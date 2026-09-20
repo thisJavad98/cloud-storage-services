@@ -121,7 +121,12 @@ Created account:
 | `POST` | `/api/auth/signup` |
 | `POST` | `/api/auth/login` |
 | `GET` | `/api/auth/me` |
+| `PATCH` | `/api/auth/me` | Update `fullName`, `bio` |
+| `POST` | `/api/auth/avatar` | Upload avatar (`multipart` field: `avatar`) |
+| `DELETE` | `/api/auth/avatar` | Remove avatar |
 | `GET` | `/api/health` |
+
+Avatars are stored under `uploads/avatars/` and served statically at `/uploads/...`.
 
 **Behaviors implemented:**
 - Quota check before upload
@@ -143,6 +148,9 @@ Created account:
 | `components/Icons.js` | Added upload / download / trash / edit / plus icons |
 | `app/dashboard/page.js` | Live storage ring, folders, recent files, upload CTA |
 | `app/files/page.js` | Full management page (CRUD UI) |
+| `app/profile/page.js` | Profile: avatar upload, name/bio edit, logout |
+| `components/UserAvatar.js` | Shared avatar with image / initials fallback |
+| `services/auth.js` | `updateProfile`, `uploadAvatar`, `removeAvatar` |
 
 **Pages:**
 
@@ -150,6 +158,7 @@ Created account:
 |---|---|
 | `/dashboard` | Home: greeting, search, quota card, folders, recent files, upload |
 | `/files` | Manage: upload, create folder, rename, download, trash, permanent delete |
+| `/profile` | Customize profile image, display name, bio; logout |
 
 UI matches existing design: phone shell (390px), `dash-pattern`, blue cards, yellow folders, Persian copy, RTL.
 

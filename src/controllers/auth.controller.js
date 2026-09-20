@@ -46,8 +46,61 @@ async function me(req, res, next) {
   }
 }
 
+async function updateProfile(req, res, next) {
+  try {
+    const user = authService.updateProfile(
+      req.user.id,
+      {
+        fullName: req.body.fullName,
+        bio: req.body.bio,
+      },
+      requestMeta(req)
+    );
+    return res.status(200).json({
+      success: true,
+      message: 'Profile updated successfully',
+      data: { user },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function uploadAvatar(req, res, next) {
+  try {
+    const user = authService.updateAvatar(
+      req.user.id,
+      req.file,
+      requestMeta(req)
+    );
+    return res.status(200).json({
+      success: true,
+      message: 'Avatar updated successfully',
+      data: { user },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function deleteAvatar(req, res, next) {
+  try {
+    const user = authService.removeAvatar(req.user.id, requestMeta(req));
+    return res.status(200).json({
+      success: true,
+      message: 'Avatar removed successfully',
+      data: { user },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   signup,
   login,
   me,
+  updateProfile,
+  uploadAvatar,
+  deleteAvatar,
 };

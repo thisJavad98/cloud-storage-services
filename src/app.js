@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const routes = require('./routes');
+const { ensureStorageRoot } = require('./config/storage');
 const { notFound, errorHandler } = require('./middleware/errorHandler');
 
 const app = express();
@@ -19,6 +20,7 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
+app.use('/uploads', express.static(ensureStorageRoot()));
 app.use('/api', routes);
 
 app.use(notFound);

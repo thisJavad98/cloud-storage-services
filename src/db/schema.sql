@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash     TEXT NOT NULL,
   full_name         TEXT NOT NULL,
   avatar_url        TEXT,
+  bio               TEXT,
   role              TEXT NOT NULL DEFAULT 'user'
                     CHECK (role IN ('user', 'admin')),
   storage_quota_bytes INTEGER NOT NULL DEFAULT 5368709120,

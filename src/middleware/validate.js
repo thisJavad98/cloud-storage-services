@@ -33,6 +33,21 @@ const loginRules = [
     .withMessage('Password is required'),
 ];
 
+const updateProfileRules = [
+  body('fullName')
+    .optional()
+    .trim()
+    .isLength({ min: 2, max: 100 })
+    .withMessage('Full name must be between 2 and 100 characters'),
+  body('bio')
+    .optional({ nullable: true })
+    .custom((value) => value === null || typeof value === 'string')
+    .withMessage('Bio must be a string or null')
+    .customSanitizer((value) => (value === null ? null : String(value).trim()))
+    .custom((value) => value === null || value.length <= 280)
+    .withMessage('Bio must be at most 280 characters'),
+];
+
 const updateFileRules = [
   body('name')
     .optional()
@@ -79,6 +94,7 @@ function validate(req, _res, next) {
 module.exports = {
   signupRules,
   loginRules,
+  updateProfileRules,
   updateFileRules,
   createFolderRules,
   updateFolderRules,

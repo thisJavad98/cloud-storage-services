@@ -14,6 +14,16 @@ function ensureStorageRoot() {
   return root;
 }
 
+function getAvatarsRoot() {
+  return path.join(getStorageRoot(), 'avatars');
+}
+
+function ensureAvatarsRoot() {
+  const root = getAvatarsRoot();
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
 function absolutePathForKey(storageKey) {
   const root = ensureStorageRoot();
   const absolute = path.join(root, storageKey);
@@ -33,5 +43,7 @@ function absolutePathForKey(storageKey) {
 module.exports = {
   getStorageRoot,
   ensureStorageRoot,
+  getAvatarsRoot,
+  ensureAvatarsRoot,
   absolutePathForKey,
 };

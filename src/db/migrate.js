@@ -30,6 +30,17 @@ async function migrate() {
   const schema = fs.readFileSync(schemaPath, 'utf8');
   db.exec(schema);
 
+  // Additive column migrations for existing databases
+  const userColumns = db
+    .prepare('PRAGMA table_info(users)')
+    .all()
+    .map((row) => row.name);
+
+  if (!userColumns.includes('bio')) {
+    db.exec('ALTER TABLE users ADD COLUMN bio TEXT;');
+    console.log('Added users.bio column.');
+  }
+
   const tableList = db
     .prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"

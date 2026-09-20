@@ -7,6 +7,7 @@ const config = {
   dbPath: process.env.DB_PATH || './data/cloud-storage.db',
   storagePath: process.env.STORAGE_PATH || './uploads',
   maxUploadBytes: Number(process.env.MAX_UPLOAD_BYTES) || 104_857_600,
+  maxAvatarBytes: Number(process.env.MAX_AVATAR_BYTES) || 2_097_152,
   jwt: {
     accessSecret: process.env.JWT_ACCESS_SECRET || 'dev-access-secret',
     refreshSecret: process.env.JWT_REFRESH_SECRET || 'dev-refresh-secret',

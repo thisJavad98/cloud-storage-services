@@ -1,6 +1,9 @@
+const fs = require('fs');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/db');
 const config = require('../config/env');
+const { absolutePathForKey } = require('../config/storage');
 const AppError = require('../utils/AppError');
 const { hashPassword, comparePassword } = require('../utils/password');
 const {
@@ -10,6 +13,13 @@ const {
   refreshExpiryDate,
 } = require('../utils/jwt');
 
+const ALLOWED_AVATAR_MIME = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+]);
+
 function publicUser(row) {
   if (!row) return null;
 
@@ -18,6 +28,7 @@ function publicUser(row) {
     email: row.email,
     fullName: row.full_name,
     avatarUrl: row.avatar_url,
+    bio: row.bio || null,
     role: row.role,
     storageQuotaBytes: row.storage_quota_bytes,
     storageUsedBytes: row.storage_used_bytes,
@@ -27,6 +38,21 @@ function publicUser(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function deleteAvatarFile(avatarUrl) {
+  if (!avatarUrl || typeof avatarUrl !== 'string') return;
+  if (!avatarUrl.startsWith('/uploads/avatars/')) return;
+
+  const storageKey = avatarUrl.replace(/^\/uploads\//, '');
+  try {
+    const absolute = absolutePathForKey(storageKey);
+    if (fs.existsSync(absolute)) {
+      fs.unlinkSync(absolute);
+    }
+  } catch {
+    // Ignore cleanup errors for stale/missing avatar files
+  }
 }
 
 function createTokenPair(user, meta = {}) {
@@ -174,9 +200,116 @@ function getProfile(userId) {
   return publicUser(user);
 }
 
+function updateProfile(userId, { fullName, bio }, meta = {}) {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+
+  if (!user) {
+    throw new AppError('User not found', 404);
+  }
+
+  const nextFullName =
+    fullName !== undefined ? String(fullName).trim() : user.full_name;
+  const nextBio =
+    bio !== undefined
+      ? bio === null || bio === ''
+        ? null
+        : String(bio).trim()
+      : user.bio;
+
+  if (!nextFullName || nextFullName.length < 2 || nextFullName.length > 100) {
+    throw new AppError('Full name must be between 2 and 100 characters', 422);
+  }
+
+  if (nextBio !== null && nextBio.length > 280) {
+    throw new AppError('Bio must be at most 280 characters', 422);
+  }
+
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE users SET full_name = ?, bio = ?, updated_at = ? WHERE id = ?`
+  ).run(nextFullName, nextBio, now, userId);
+
+  logActivity(userId, 'auth.profile_update', {
+    ipAddress: meta.ipAddress,
+    userAgent: meta.userAgent,
+  });
+
+  return getProfile(userId);
+}
+
+function updateAvatar(userId, file, meta = {}) {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+
+  if (!user) {
+    throw new AppError('User not found', 404);
+  }
+
+  if (!file) {
+    throw new AppError('Avatar image is required', 400);
+  }
+
+  if (!ALLOWED_AVATAR_MIME.has(file.mimetype)) {
+    if (file.path && fs.existsSync(file.path)) {
+      fs.unlinkSync(file.path);
+    }
+    throw new AppError('Avatar must be a JPEG, PNG, WebP, or GIF image', 400);
+  }
+
+  const filename = path.basename(file.filename || file.path);
+  const avatarUrl = `/uploads/avatars/${filename}`;
+  const previousAvatar = user.avatar_url;
+  const now = new Date().toISOString();
+
+  db.prepare(
+    `UPDATE users SET avatar_url = ?, updated_at = ? WHERE id = ?`
+  ).run(avatarUrl, now, userId);
+
+  if (previousAvatar && previousAvatar !== avatarUrl) {
+    deleteAvatarFile(previousAvatar);
+  }
+
+  logActivity(userId, 'auth.avatar_update', {
+    ipAddress: meta.ipAddress,
+    userAgent: meta.userAgent,
+  });
+
+  return getProfile(userId);
+}
+
+function removeAvatar(userId, meta = {}) {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+
+  if (!user) {
+    throw new AppError('User not found', 404);
+  }
+
+  if (!user.avatar_url) {
+    return publicUser(user);
+  }
+
+  const previousAvatar = user.avatar_url;
+  const now = new Date().toISOString();
+
+  db.prepare(
+    `UPDATE users SET avatar_url = NULL, updated_at = ? WHERE id = ?`
+  ).run(now, userId);
+
+  deleteAvatarFile(previousAvatar);
+
+  logActivity(userId, 'auth.avatar_remove', {
+    ipAddress: meta.ipAddress,
+    userAgent: meta.userAgent,
+  });
+
+  return getProfile(userId);
+}
+
 module.exports = {
   signup,
   login,
   getProfile,
+  updateProfile,
+  updateAvatar,
+  removeAvatar,
   publicUser,
 };
