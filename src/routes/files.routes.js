@@ -62,6 +62,7 @@ router.get('/folders/:id', filesController.getFolder);
 router.patch('/folders/:id', updateFolderRules, validate, filesController.updateFolder);
 router.delete('/folders/:id', filesController.removeFolder);
 
+router.get('/search', filesController.search);
 router.get('/', filesController.list);
 router.post('/', handleUpload, filesController.upload);
 router.get('/:id', filesController.getOne);

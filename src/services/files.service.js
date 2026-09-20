@@ -236,6 +236,18 @@ function listFiles(userId, query = {}) {
   }
 
   const search = typeof query.search === 'string' ? query.search.trim() : '';
+  const mimeType =
+    typeof query.mimeType === 'string' ? query.mimeType.trim().toLowerCase() : '';
+  const minSizeRaw = query.minSize;
+  const maxSizeRaw = query.maxSize;
+  const minSize =
+    minSizeRaw !== undefined && minSizeRaw !== '' && Number.isFinite(Number(minSizeRaw))
+      ? Math.max(Number(minSizeRaw), 0)
+      : null;
+  const maxSize =
+    maxSizeRaw !== undefined && maxSizeRaw !== '' && Number.isFinite(Number(maxSizeRaw))
+      ? Math.max(Number(maxSizeRaw), 0)
+      : null;
   const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
   const offset = Math.max(Number(query.offset) || 0, 0);
 
@@ -256,6 +268,26 @@ function listFiles(userId, query = {}) {
   if (search) {
     where.push('LOWER(name) LIKE ?');
     params.push(`%${search.toLowerCase()}%`);
+  }
+
+  if (mimeType) {
+    if (mimeType.endsWith('/')) {
+      where.push('LOWER(mime_type) LIKE ?');
+      params.push(`${mimeType}%`);
+    } else {
+      where.push('LOWER(mime_type) = ?');
+      params.push(mimeType);
+    }
+  }
+
+  if (minSize !== null) {
+    where.push('size_bytes >= ?');
+    params.push(minSize);
+  }
+
+  if (maxSize !== null) {
+    where.push('size_bytes <= ?');
+    params.push(maxSize);
   }
 
   const rows = db
@@ -436,6 +468,12 @@ function listFolders(userId, query = {}) {
     }
   }
 
+  const search = typeof query.search === 'string' ? query.search.trim() : '';
+  if (search) {
+    where.push('LOWER(f.name) LIKE ?');
+    params.push(`%${search.toLowerCase()}%`);
+  }
+
   const rows = db
     .prepare(
       `SELECT f.*,
@@ -452,6 +490,58 @@ function listFolders(userId, query = {}) {
     .all(...params);
 
   return rows.map(publicFolder);
+}
+
+function searchLibrary(userId, query = {}) {
+  const rawQ =
+    typeof query.q === 'string'
+      ? query.q
+      : typeof query.search === 'string'
+        ? query.search
+        : '';
+  const search = String(rawQ || '').trim();
+  const scope = ['all', 'files', 'folders'].includes(query.scope)
+    ? query.scope
+    : 'all';
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const fileQuery = {
+    search,
+    folderId: query.folderId,
+    mimeType: query.mimeType,
+    minSize: query.minSize,
+    maxSize: query.maxSize,
+    trashed: query.trashed,
+    limit,
+    offset: query.offset,
+  };
+
+  const folderQuery = {
+    search,
+  };
+  if (query.parentId !== undefined) {
+    folderQuery.parentId = query.parentId;
+  }
+
+  let files = [];
+  let pagination = { total: 0, limit, offset: Math.max(Number(query.offset) || 0, 0) };
+  let folders = [];
+
+  if (scope === 'all' || scope === 'files') {
+    const result = listFiles(userId, fileQuery);
+    files = result.files;
+    pagination = result.pagination;
+  }
+
+  if (scope === 'all' || scope === 'folders') {
+    folders = listFolders(userId, folderQuery).slice(0, limit);
+  }
+
+  return {
+    files,
+    folders,
+    pagination,
+  };
 }
 
 function getFolder(userId, folderId) {
@@ -631,6 +721,7 @@ ensureStorageRoot();
 module.exports = {
   uploadFile,
   listFiles,
+  searchLibrary,
   getFile,
   getDownloadTarget,
   updateFile,

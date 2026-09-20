@@ -104,14 +104,15 @@ Created account:
 | Method | Endpoint | Action |
 |---|---|---|
 | `POST` | `/api/files` | Upload (`multipart` field name: `file`) |
-| `GET` | `/api/files` | List (`search`, `folderId`, `trashed`, `limit`, `offset`) |
+| `GET` | `/api/files` | List (`search`, `folderId`, `mimeType`, `minSize`, `maxSize`, `trashed`, `limit`, `offset`) |
+| `GET` | `/api/files/search` | Search files + folders (`q`/`search`, `scope=all\|files\|folders`, `folderId`, `mimeType`, `minSize`, `maxSize`, `limit`) |
 | `GET` | `/api/files/:id` | File metadata |
 | `GET` | `/api/files/:id/download` | Download binary |
 | `PATCH` | `/api/files/:id` | Rename / move (`name`, `folderId`) |
 | `POST` | `/api/files/:id/trash` | Soft delete |
 | `POST` | `/api/files/:id/restore` | Restore from trash |
 | `DELETE` | `/api/files/:id` | Permanent delete (+ free quota) |
-| `GET` | `/api/files/folders` | List folders (+ `fileCount`) |
+| `GET` | `/api/files/folders` | List folders (`search`, `parentId`, + `fileCount`) |
 | `POST` | `/api/files/folders` | Create folder |
 
 **Also still available:**

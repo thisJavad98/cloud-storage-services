@@ -41,6 +41,18 @@ async function list(req, res, next) {
   }
 }
 
+async function search(req, res, next) {
+  try {
+    const result = filesService.searchLibrary(req.user.id, req.query);
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function getOne(req, res, next) {
   try {
     const file = filesService.getFile(req.user.id, req.params.id);
@@ -231,6 +243,7 @@ async function removeFolder(req, res, next) {
 module.exports = {
   upload,
   list,
+  search,
   getOne,
   download,
   update,
