@@ -7,6 +7,7 @@ const { authenticate } = require('../middleware/auth');
 const {
   updateFileRules,
   createFolderRules,
+  updateFolderRules,
   validate,
 } = require('../middleware/validate');
 const { ensureStorageRoot } = require('../config/storage');
@@ -57,6 +58,9 @@ router.use(authenticate);
 
 router.get('/folders', filesController.listFolders);
 router.post('/folders', createFolderRules, validate, filesController.createFolder);
+router.get('/folders/:id', filesController.getFolder);
+router.patch('/folders/:id', updateFolderRules, validate, filesController.updateFolder);
+router.delete('/folders/:id', filesController.removeFolder);
 
 router.get('/', filesController.list);
 router.post('/', handleUpload, filesController.upload);

@@ -220,7 +220,21 @@ function listFiles(userId, query = {}) {
   getUserOrThrow(userId);
 
   const includeTrashed = query.trashed === true || query.trashed === 'true';
-  const folderId = query.folderId === undefined ? undefined : query.folderId || null;
+  let folderId;
+  if (query.folderId === undefined) {
+    folderId = undefined;
+  } else if (
+    query.folderId === null ||
+    query.folderId === '' ||
+    query.folderId === 'null' ||
+    query.folderId === 'root'
+  ) {
+    folderId = null;
+  } else {
+    folderId = query.folderId;
+    assertFolderOwned(userId, folderId);
+  }
+
   const search = typeof query.search === 'string' ? query.search.trim() : '';
   const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
   const offset = Math.max(Number(query.offset) || 0, 0);
@@ -401,8 +415,26 @@ function deleteFilePermanent(userId, fileId, meta = {}) {
   return { id: fileId, deleted: true };
 }
 
-function listFolders(userId) {
+function listFolders(userId, query = {}) {
   getUserOrThrow(userId);
+
+  const where = ['f.user_id = ?', 'f.is_trashed = 0', "f.path != '/'"];
+  const params = [userId];
+
+  if (query.parentId !== undefined) {
+    if (
+      query.parentId === null ||
+      query.parentId === '' ||
+      query.parentId === 'null' ||
+      query.parentId === 'root'
+    ) {
+      where.push('f.parent_id IS NULL');
+    } else {
+      assertFolderOwned(userId, query.parentId);
+      where.push('f.parent_id = ?');
+      params.push(query.parentId);
+    }
+  }
 
   const rows = db
     .prepare(
@@ -414,22 +446,149 @@ function listFolders(userId) {
                   AND fi.is_trashed = 0
               ) AS file_count
        FROM folders f
-       WHERE f.user_id = ? AND f.is_trashed = 0
+       WHERE ${where.join(' AND ')}
        ORDER BY f.name ASC`
     )
-    .all(userId);
+    .all(...params);
 
   return rows.map(publicFolder);
+}
+
+function getFolder(userId, folderId) {
+  getUserOrThrow(userId);
+
+  const folder = db
+    .prepare(
+      `SELECT f.*,
+              (
+                SELECT COUNT(*) FROM files fi
+                WHERE fi.folder_id = f.id
+                  AND fi.user_id = f.user_id
+                  AND fi.is_trashed = 0
+              ) AS file_count
+       FROM folders f
+       WHERE f.id = ? AND f.user_id = ? AND f.is_trashed = 0`
+    )
+    .get(folderId, userId);
+
+  if (!folder || folder.path === '/') {
+    throw new AppError('Folder not found', 404);
+  }
+
+  return publicFolder(folder);
+}
+
+function updateFolder(userId, folderId, payload = {}, meta = {}) {
+  const folder = getFolder(userId, folderId);
+  const nextName =
+    payload.name !== undefined ? sanitizeFileName(payload.name) : folder.name;
+
+  const existing = db
+    .prepare(
+      `SELECT id FROM folders
+       WHERE user_id = ?
+         AND ((parent_id IS NULL AND ? IS NULL) OR parent_id = ?)
+         AND name = ?
+         AND is_trashed = 0
+         AND id != ?`
+    )
+    .get(userId, folder.parentId, folder.parentId, nextName, folderId);
+
+  if (existing) {
+    throw new AppError('A folder with this name already exists', 409);
+  }
+
+  let parentPath = '/';
+  if (folder.parentId) {
+    const parent = assertFolderOwned(userId, folder.parentId);
+    parentPath = parent.path.endsWith('/') ? parent.path : `${parent.path}/`;
+  }
+
+  const nextPath = `${parentPath}${nextName}`;
+  const now = new Date().toISOString();
+
+  db.prepare(
+    `UPDATE folders
+     SET name = ?, path = ?, updated_at = ?
+     WHERE id = ? AND user_id = ?`
+  ).run(nextName, nextPath, now, folderId, userId);
+
+  logActivity(userId, 'folder.update', {
+    resourceType: 'folder',
+    resourceId: folderId,
+    ipAddress: meta.ipAddress,
+    userAgent: meta.userAgent,
+    metadata: { name: nextName },
+  });
+
+  return getFolder(userId, folderId);
+}
+
+function deleteFolder(userId, folderId, meta = {}) {
+  const folder = getFolder(userId, folderId);
+  const now = new Date().toISOString();
+
+  const childFolders = db
+    .prepare(
+      `SELECT id FROM folders
+       WHERE user_id = ? AND parent_id = ? AND is_trashed = 0`
+    )
+    .all(userId, folderId);
+
+  if (childFolders.length > 0) {
+    throw new AppError('Folder has subfolders. Remove them first.', 400);
+  }
+
+  const filesInFolder = db
+    .prepare(
+      `SELECT id FROM files
+       WHERE user_id = ? AND folder_id = ? AND is_trashed = 0`
+    )
+    .all(userId, folderId);
+
+  const remove = db.transaction(() => {
+    for (const file of filesInFolder) {
+      db.prepare(
+        `UPDATE files
+         SET is_trashed = 1, trashed_at = ?, updated_at = ?
+         WHERE id = ? AND user_id = ?`
+      ).run(now, now, file.id, userId);
+    }
+
+    db.prepare(
+      `UPDATE folders
+       SET is_trashed = 1, trashed_at = ?, updated_at = ?
+       WHERE id = ? AND user_id = ?`
+    ).run(now, now, folderId, userId);
+  });
+
+  remove();
+
+  logActivity(userId, 'folder.delete', {
+    resourceType: 'folder',
+    resourceId: folderId,
+    ipAddress: meta.ipAddress,
+    userAgent: meta.userAgent,
+    metadata: { name: folder.name, trashedFiles: filesInFolder.length },
+  });
+
+  return { id: folderId, deleted: true, trashedFiles: filesInFolder.length };
 }
 
 function createFolder(userId, { name, parentId = null } = {}, meta = {}) {
   getUserOrThrow(userId);
   const folderName = sanitizeFileName(name);
   let parentPath = '/';
+  let resolvedParentId = parentId || null;
 
-  if (parentId) {
-    const parent = assertFolderOwned(userId, parentId);
-    parentPath = parent.path.endsWith('/') ? parent.path : `${parent.path}/`;
+  if (resolvedParentId) {
+    const parent = assertFolderOwned(userId, resolvedParentId);
+    if (parent.path === '/') {
+      resolvedParentId = null;
+      parentPath = '/';
+    } else {
+      parentPath = parent.path.endsWith('/') ? parent.path : `${parent.path}/`;
+    }
   }
 
   const existing = db
@@ -438,9 +597,10 @@ function createFolder(userId, { name, parentId = null } = {}, meta = {}) {
        WHERE user_id = ?
          AND ((parent_id IS NULL AND ? IS NULL) OR parent_id = ?)
          AND name = ?
-         AND is_trashed = 0`
+         AND is_trashed = 0
+         AND path != '/'`
     )
-    .get(userId, parentId, parentId, folderName);
+    .get(userId, resolvedParentId, resolvedParentId, folderName);
 
   if (existing) {
     throw new AppError('A folder with this name already exists', 409);
@@ -453,17 +613,17 @@ function createFolder(userId, { name, parentId = null } = {}, meta = {}) {
   db.prepare(
     `INSERT INTO folders (id, user_id, parent_id, name, path, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(folderId, userId, parentId, folderName, folderPath, now, now);
+  ).run(folderId, userId, resolvedParentId, folderName, folderPath, now, now);
 
   logActivity(userId, 'folder.create', {
     resourceType: 'folder',
     resourceId: folderId,
     ipAddress: meta.ipAddress,
     userAgent: meta.userAgent,
-    metadata: { name: folderName, parentId },
+    metadata: { name: folderName, parentId: resolvedParentId },
   });
 
-  return publicFolder(db.prepare('SELECT * FROM folders WHERE id = ?').get(folderId));
+  return getFolder(userId, folderId);
 }
 
 ensureStorageRoot();
@@ -478,7 +638,10 @@ module.exports = {
   restoreFile,
   deleteFilePermanent,
   listFolders,
+  getFolder,
   createFolder,
+  updateFolder,
+  deleteFolder,
   publicFile,
   publicFolder,
 };

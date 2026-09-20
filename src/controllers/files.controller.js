@@ -148,10 +148,22 @@ async function remove(req, res, next) {
 
 async function listFolders(req, res, next) {
   try {
-    const folders = filesService.listFolders(req.user.id);
+    const folders = filesService.listFolders(req.user.id, req.query);
     return res.status(200).json({
       success: true,
       data: { folders },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function getFolder(req, res, next) {
+  try {
+    const folder = filesService.getFolder(req.user.id, req.params.id);
+    return res.status(200).json({
+      success: true,
+      data: { folder },
     });
   } catch (error) {
     return next(error);
@@ -179,6 +191,43 @@ async function createFolder(req, res, next) {
   }
 }
 
+async function updateFolder(req, res, next) {
+  try {
+    const folder = filesService.updateFolder(
+      req.user.id,
+      req.params.id,
+      { name: req.body?.name },
+      requestMeta(req)
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Folder updated successfully',
+      data: { folder },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function removeFolder(req, res, next) {
+  try {
+    const result = filesService.deleteFolder(
+      req.user.id,
+      req.params.id,
+      requestMeta(req)
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Folder deleted successfully',
+      data: result,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   upload,
   list,
@@ -189,5 +238,8 @@ module.exports = {
   restore,
   remove,
   listFolders,
+  getFolder,
   createFolder,
+  updateFolder,
+  removeFolder,
 };

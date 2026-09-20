@@ -56,6 +56,13 @@ const createFolderRules = [
     .withMessage('parentId must be a string or null'),
 ];
 
+const updateFolderRules = [
+  body('name')
+    .trim()
+    .isLength({ min: 1, max: 255 })
+    .withMessage('Folder name must be between 1 and 255 characters'),
+];
+
 function validate(req, _res, next) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -74,5 +81,6 @@ module.exports = {
   loginRules,
   updateFileRules,
   createFolderRules,
+  updateFolderRules,
   validate,
 };
