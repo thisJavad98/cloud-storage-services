@@ -5,6 +5,8 @@ const config = {
   port: Number(process.env.PORT) || 4000,
   nodeEnv: process.env.NODE_ENV || 'development',
   dbPath: process.env.DB_PATH || './data/cloud-storage.db',
+  storagePath: process.env.STORAGE_PATH || './uploads',
+  maxUploadBytes: Number(process.env.MAX_UPLOAD_BYTES) || 104_857_600,
   jwt: {
     accessSecret: process.env.JWT_ACCESS_SECRET || 'dev-access-secret',
     refreshSecret: process.env.JWT_REFRESH_SECRET || 'dev-refresh-secret',

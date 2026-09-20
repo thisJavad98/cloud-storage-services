@@ -33,6 +33,29 @@ const loginRules = [
     .withMessage('Password is required'),
 ];
 
+const updateFileRules = [
+  body('name')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 255 })
+    .withMessage('File name must be between 1 and 255 characters'),
+  body('folderId')
+    .optional({ nullable: true })
+    .custom((value) => value === null || value === '' || typeof value === 'string')
+    .withMessage('folderId must be a string or null'),
+];
+
+const createFolderRules = [
+  body('name')
+    .trim()
+    .isLength({ min: 1, max: 255 })
+    .withMessage('Folder name must be between 1 and 255 characters'),
+  body('parentId')
+    .optional({ nullable: true })
+    .custom((value) => value === null || value === '' || typeof value === 'string')
+    .withMessage('parentId must be a string or null'),
+];
+
 function validate(req, _res, next) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -49,5 +72,7 @@ function validate(req, _res, next) {
 module.exports = {
   signupRules,
   loginRules,
+  updateFileRules,
+  createFolderRules,
   validate,
 };
