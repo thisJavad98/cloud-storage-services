@@ -1,4 +1,7 @@
+const { handleUpload } = require('@vercel/blob/client');
 const filesService = require('../services/files.service');
+const config = require('../config/env');
+const AppError = require('../utils/AppError');
 
 function requestMeta(req) {
   return {
@@ -7,14 +10,117 @@ function requestMeta(req) {
   };
 }
 
-async function upload(req, res, next) {
+function parseClientPayload(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
   try {
-    const file = filesService.uploadFile(
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function toWebRequest(req) {
+  const host = req.get('host') || 'localhost';
+  const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+  const url = `${proto}://${host}${req.originalUrl || req.url}`;
+  const headers = new Headers();
+
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (value === undefined) continue;
+    headers.set(key, Array.isArray(value) ? value.join(',') : String(value));
+  }
+
+  return new Request(url, {
+    method: req.method,
+    headers,
+  });
+}
+
+async function blobUpload(req, res, next) {
+  try {
+    const jsonResponse = await handleUpload({
+      body: req.body,
+      request: toWebRequest(req),
+      onBeforeGenerateToken: async (_pathname, clientPayload) => {
+        const payload = parseClientPayload(clientPayload);
+        const intent = await filesService.validateUploadIntent(req.user.id, {
+          folderId: payload.folderId || null,
+          name: payload.name,
+          originalName: payload.name,
+          sizeBytes: payload.sizeBytes,
+        });
+
+        return {
+          maximumSizeInBytes: Math.min(
+            config.maxUploadBytes,
+            intent.maxUploadBytes || config.maxUploadBytes
+          ),
+          tokenPayload: JSON.stringify({
+            userId: req.user.id,
+            folderId: intent.folderId,
+            name: intent.name,
+            ipAddress: req.ip,
+            userAgent: req.get('user-agent'),
+          }),
+          addRandomSuffix: false,
+        };
+      },
+      onUploadCompleted: async ({ blob, tokenPayload }) => {
+        const payload = parseClientPayload(tokenPayload);
+        if (!payload.userId) return;
+
+        await filesService.registerUploadedFile(
+          payload.userId,
+          {
+            url: blob.url,
+            pathname: blob.pathname,
+            size: blob.size,
+            contentType: blob.contentType,
+          },
+          {
+            folderId: payload.folderId || null,
+            name: payload.name,
+            mimeType: blob.contentType,
+          },
+          {
+            ipAddress: payload.ipAddress,
+            userAgent: payload.userAgent,
+          }
+        );
+      },
+    });
+
+    return res.status(200).json(jsonResponse);
+  } catch (error) {
+    if (error instanceof AppError) {
+      return next(error);
+    }
+    return next(new AppError(error.message || 'Upload failed', 400));
+  }
+}
+
+async function completeUpload(req, res, next) {
+  try {
+    const { url, pathname, size, contentType, name, folderId } = req.body || {};
+
+    if (!url && !pathname) {
+      throw new AppError('Blob url is required', 400);
+    }
+
+    const file = await filesService.registerUploadedFile(
       req.user.id,
-      req.file,
       {
-        name: req.body?.name,
-        folderId: req.body?.folderId || null,
+        url,
+        pathname,
+        size,
+        contentType,
+      },
+      {
+        folderId: folderId || null,
+        name,
+        mimeType: contentType,
+        sizeBytes: size,
       },
       requestMeta(req)
     );
@@ -31,7 +137,7 @@ async function upload(req, res, next) {
 
 async function list(req, res, next) {
   try {
-    const result = filesService.listFiles(req.user.id, req.query);
+    const result = await filesService.listFiles(req.user.id, req.query);
     return res.status(200).json({
       success: true,
       data: result,
@@ -43,7 +149,7 @@ async function list(req, res, next) {
 
 async function search(req, res, next) {
   try {
-    const result = filesService.searchLibrary(req.user.id, req.query);
+    const result = await filesService.searchLibrary(req.user.id, req.query);
     return res.status(200).json({
       success: true,
       data: result,
@@ -55,7 +161,7 @@ async function search(req, res, next) {
 
 async function getOne(req, res, next) {
   try {
-    const file = filesService.getFile(req.user.id, req.params.id);
+    const file = await filesService.getFile(req.user.id, req.params.id);
     return res.status(200).json({
       success: true,
       data: { file },
@@ -67,16 +173,12 @@ async function getOne(req, res, next) {
 
 async function download(req, res, next) {
   try {
-    const { file, absolutePath } = filesService.getDownloadTarget(
+    const { downloadUrl } = await filesService.getDownloadTarget(
       req.user.id,
       req.params.id
     );
 
-    return res.download(absolutePath, file.name, (error) => {
-      if (error && !res.headersSent) {
-        next(error);
-      }
-    });
+    return res.redirect(302, downloadUrl);
   } catch (error) {
     return next(error);
   }
@@ -84,7 +186,7 @@ async function download(req, res, next) {
 
 async function update(req, res, next) {
   try {
-    const file = filesService.updateFile(
+    const file = await filesService.updateFile(
       req.user.id,
       req.params.id,
       {
@@ -106,7 +208,7 @@ async function update(req, res, next) {
 
 async function trash(req, res, next) {
   try {
-    const file = filesService.trashFile(
+    const file = await filesService.trashFile(
       req.user.id,
       req.params.id,
       requestMeta(req)
@@ -124,7 +226,7 @@ async function trash(req, res, next) {
 
 async function restore(req, res, next) {
   try {
-    const file = filesService.restoreFile(
+    const file = await filesService.restoreFile(
       req.user.id,
       req.params.id,
       requestMeta(req)
@@ -142,7 +244,7 @@ async function restore(req, res, next) {
 
 async function remove(req, res, next) {
   try {
-    const result = filesService.deleteFilePermanent(
+    const result = await filesService.deleteFilePermanent(
       req.user.id,
       req.params.id,
       requestMeta(req)
@@ -160,7 +262,7 @@ async function remove(req, res, next) {
 
 async function listFolders(req, res, next) {
   try {
-    const folders = filesService.listFolders(req.user.id, req.query);
+    const folders = await filesService.listFolders(req.user.id, req.query);
     return res.status(200).json({
       success: true,
       data: { folders },
@@ -172,7 +274,7 @@ async function listFolders(req, res, next) {
 
 async function getFolder(req, res, next) {
   try {
-    const folder = filesService.getFolder(req.user.id, req.params.id);
+    const folder = await filesService.getFolder(req.user.id, req.params.id);
     return res.status(200).json({
       success: true,
       data: { folder },
@@ -184,7 +286,7 @@ async function getFolder(req, res, next) {
 
 async function createFolder(req, res, next) {
   try {
-    const folder = filesService.createFolder(
+    const folder = await filesService.createFolder(
       req.user.id,
       {
         name: req.body?.name,
@@ -205,7 +307,7 @@ async function createFolder(req, res, next) {
 
 async function updateFolder(req, res, next) {
   try {
-    const folder = filesService.updateFolder(
+    const folder = await filesService.updateFolder(
       req.user.id,
       req.params.id,
       { name: req.body?.name },
@@ -224,7 +326,7 @@ async function updateFolder(req, res, next) {
 
 async function removeFolder(req, res, next) {
   try {
-    const result = filesService.deleteFolder(
+    const result = await filesService.deleteFolder(
       req.user.id,
       req.params.id,
       requestMeta(req)
@@ -241,7 +343,8 @@ async function removeFolder(req, res, next) {
 }
 
 module.exports = {
-  upload,
+  blobUpload,
+  completeUpload,
   list,
   search,
   getOne,

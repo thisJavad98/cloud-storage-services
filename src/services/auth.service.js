@@ -1,9 +1,7 @@
-const fs = require('fs');
-const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/db');
 const config = require('../config/env');
-const { absolutePathForKey } = require('../config/storage');
+const { putPublicBlob, deleteBlob, buildAvatarPathname, isBlobUrl } = require('../config/storage');
 const AppError = require('../utils/AppError');
 const { hashPassword, comparePassword } = require('../utils/password');
 const {
@@ -20,6 +18,12 @@ const ALLOWED_AVATAR_MIME = new Set([
   'image/gif',
 ]);
 
+function toIso(value) {
+  if (!value) return value;
+  if (value instanceof Date) return value.toISOString();
+  return value;
+}
+
 function publicUser(row) {
   if (!row) return null;
 
@@ -30,32 +34,25 @@ function publicUser(row) {
     avatarUrl: row.avatar_url,
     bio: row.bio || null,
     role: row.role,
-    storageQuotaBytes: row.storage_quota_bytes,
-    storageUsedBytes: row.storage_used_bytes,
+    storageQuotaBytes: Number(row.storage_quota_bytes),
+    storageUsedBytes: Number(row.storage_used_bytes),
     isActive: Boolean(row.is_active),
-    emailVerifiedAt: row.email_verified_at,
-    lastLoginAt: row.last_login_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    emailVerifiedAt: toIso(row.email_verified_at),
+    lastLoginAt: toIso(row.last_login_at),
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
   };
 }
 
-function deleteAvatarFile(avatarUrl) {
+async function deleteAvatarBlob(avatarUrl) {
   if (!avatarUrl || typeof avatarUrl !== 'string') return;
-  if (!avatarUrl.startsWith('/uploads/avatars/')) return;
-
-  const storageKey = avatarUrl.replace(/^\/uploads\//, '');
-  try {
-    const absolute = absolutePathForKey(storageKey);
-    if (fs.existsSync(absolute)) {
-      fs.unlinkSync(absolute);
-    }
-  } catch {
-    // Ignore cleanup errors for stale/missing avatar files
+  if (!isBlobUrl(avatarUrl) && !avatarUrl.startsWith('/uploads/avatars/')) {
+    return;
   }
+  await deleteBlob(avatarUrl);
 }
 
-function createTokenPair(user, meta = {}) {
+async function createTokenPair(user, meta = {}) {
   const accessToken = signAccessToken({
     sub: user.id,
     email: user.email,
@@ -68,43 +65,45 @@ function createTokenPair(user, meta = {}) {
   });
 
   const tokenId = uuidv4();
-  db.prepare(
+  await db.execute(
     `INSERT INTO refresh_tokens (id, user_id, token_hash, device_info, ip_address, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(
-    tokenId,
-    user.id,
-    hashToken(refreshToken),
-    meta.deviceInfo || null,
-    meta.ipAddress || null,
-    refreshExpiryDate()
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      tokenId,
+      user.id,
+      hashToken(refreshToken),
+      meta.deviceInfo || null,
+      meta.ipAddress || null,
+      refreshExpiryDate(),
+    ]
   );
 
   return { accessToken, refreshToken };
 }
 
-function logActivity(userId, action, meta = {}) {
-  db.prepare(
+async function logActivity(userId, action, meta = {}) {
+  await db.execute(
     `INSERT INTO activity_logs (id, user_id, action, resource_type, resource_id, ip_address, user_agent, metadata)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    uuidv4(),
-    userId,
-    action,
-    meta.resourceType || null,
-    meta.resourceId || null,
-    meta.ipAddress || null,
-    meta.userAgent || null,
-    meta.metadata ? JSON.stringify(meta.metadata) : null
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      uuidv4(),
+      userId,
+      action,
+      meta.resourceType || null,
+      meta.resourceId || null,
+      meta.ipAddress || null,
+      meta.userAgent || null,
+      meta.metadata ? JSON.stringify(meta.metadata) : null,
+    ]
   );
 }
 
 async function signup({ email, password, fullName }, meta = {}) {
   const normalizedEmail = email.trim().toLowerCase();
 
-  const existing = db
-    .prepare('SELECT id FROM users WHERE email = ?')
-    .get(normalizedEmail);
+  const existing = await db.one('SELECT id FROM users WHERE email = $1', [
+    normalizedEmail,
+  ]);
 
   if (existing) {
     throw new AppError('Email is already registered', 409);
@@ -112,36 +111,32 @@ async function signup({ email, password, fullName }, meta = {}) {
 
   const userId = uuidv4();
   const passwordHash = await hashPassword(password);
-  const now = new Date().toISOString();
 
-  const insertUser = db.transaction(() => {
-    db.prepare(
+  await db.transaction(async (tx) => {
+    await tx.execute(
       `INSERT INTO users (
-         id, email, password_hash, full_name, storage_quota_bytes, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      userId,
-      normalizedEmail,
-      passwordHash,
-      fullName.trim(),
-      config.defaultStorageQuotaBytes,
-      now,
-      now
+         id, email, password_hash, full_name, storage_quota_bytes
+       ) VALUES ($1, $2, $3, $4, $5)`,
+      [
+        userId,
+        normalizedEmail,
+        passwordHash,
+        fullName.trim(),
+        config.defaultStorageQuotaBytes,
+      ]
     );
 
-    // Create a root folder marker path for the user
-    db.prepare(
+    await tx.execute(
       `INSERT INTO folders (id, user_id, parent_id, name, path)
-       VALUES (?, ?, NULL, ?, ?)`
-    ).run(uuidv4(), userId, 'My Drive', '/');
+       VALUES ($1, $2, NULL, $3, $4)`,
+      [uuidv4(), userId, 'My Drive', '/']
+    );
   });
 
-  insertUser();
+  const user = await db.one('SELECT * FROM users WHERE id = $1', [userId]);
+  const tokens = await createTokenPair(user, meta);
 
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
-  const tokens = createTokenPair(user, meta);
-
-  logActivity(userId, 'auth.signup', {
+  await logActivity(userId, 'auth.signup', {
     ipAddress: meta.ipAddress,
     userAgent: meta.userAgent,
   });
@@ -154,9 +149,9 @@ async function signup({ email, password, fullName }, meta = {}) {
 
 async function login({ email, password }, meta = {}) {
   const normalizedEmail = email.trim().toLowerCase();
-  const user = db
-    .prepare('SELECT * FROM users WHERE email = ?')
-    .get(normalizedEmail);
+  const user = await db.one('SELECT * FROM users WHERE email = $1', [
+    normalizedEmail,
+  ]);
 
   if (!user) {
     throw new AppError('Invalid email or password', 401);
@@ -171,15 +166,15 @@ async function login({ email, password }, meta = {}) {
     throw new AppError('Invalid email or password', 401);
   }
 
-  const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?`
-  ).run(now, now, user.id);
+  await db.execute(
+    `UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1`,
+    [user.id]
+  );
 
-  const refreshed = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
-  const tokens = createTokenPair(refreshed, meta);
+  const refreshed = await db.one('SELECT * FROM users WHERE id = $1', [user.id]);
+  const tokens = await createTokenPair(refreshed, meta);
 
-  logActivity(user.id, 'auth.login', {
+  await logActivity(user.id, 'auth.login', {
     ipAddress: meta.ipAddress,
     userAgent: meta.userAgent,
   });
@@ -190,8 +185,8 @@ async function login({ email, password }, meta = {}) {
   };
 }
 
-function getProfile(userId) {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+async function getProfile(userId) {
+  const user = await db.one('SELECT * FROM users WHERE id = $1', [userId]);
 
   if (!user) {
     throw new AppError('User not found', 404);
@@ -200,8 +195,8 @@ function getProfile(userId) {
   return publicUser(user);
 }
 
-function updateProfile(userId, { fullName, bio }, meta = {}) {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+async function updateProfile(userId, { fullName, bio }, meta = {}) {
+  const user = await db.one('SELECT * FROM users WHERE id = $1', [userId]);
 
   if (!user) {
     throw new AppError('User not found', 404);
@@ -224,12 +219,12 @@ function updateProfile(userId, { fullName, bio }, meta = {}) {
     throw new AppError('Bio must be at most 280 characters', 422);
   }
 
-  const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE users SET full_name = ?, bio = ?, updated_at = ? WHERE id = ?`
-  ).run(nextFullName, nextBio, now, userId);
+  await db.execute(
+    `UPDATE users SET full_name = $1, bio = $2, updated_at = NOW() WHERE id = $3`,
+    [nextFullName, nextBio, userId]
+  );
 
-  logActivity(userId, 'auth.profile_update', {
+  await logActivity(userId, 'auth.profile_update', {
     ipAddress: meta.ipAddress,
     userAgent: meta.userAgent,
   });
@@ -237,8 +232,8 @@ function updateProfile(userId, { fullName, bio }, meta = {}) {
   return getProfile(userId);
 }
 
-function updateAvatar(userId, file, meta = {}) {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+async function updateAvatar(userId, file, meta = {}) {
+  const user = await db.one('SELECT * FROM users WHERE id = $1', [userId]);
 
   if (!user) {
     throw new AppError('User not found', 404);
@@ -249,26 +244,28 @@ function updateAvatar(userId, file, meta = {}) {
   }
 
   if (!ALLOWED_AVATAR_MIME.has(file.mimetype)) {
-    if (file.path && fs.existsSync(file.path)) {
-      fs.unlinkSync(file.path);
-    }
     throw new AppError('Avatar must be a JPEG, PNG, WebP, or GIF image', 400);
   }
 
-  const filename = path.basename(file.filename || file.path);
-  const avatarUrl = `/uploads/avatars/${filename}`;
+  const pathname = buildAvatarPathname(userId, file.originalname || file.filename);
+  const blob = await putPublicBlob(
+    pathname,
+    file.buffer,
+    file.mimetype || 'application/octet-stream'
+  );
+
   const previousAvatar = user.avatar_url;
-  const now = new Date().toISOString();
 
-  db.prepare(
-    `UPDATE users SET avatar_url = ?, updated_at = ? WHERE id = ?`
-  ).run(avatarUrl, now, userId);
+  await db.execute(
+    `UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2`,
+    [blob.url, userId]
+  );
 
-  if (previousAvatar && previousAvatar !== avatarUrl) {
-    deleteAvatarFile(previousAvatar);
+  if (previousAvatar && previousAvatar !== blob.url) {
+    await deleteAvatarBlob(previousAvatar);
   }
 
-  logActivity(userId, 'auth.avatar_update', {
+  await logActivity(userId, 'auth.avatar_update', {
     ipAddress: meta.ipAddress,
     userAgent: meta.userAgent,
   });
@@ -276,8 +273,8 @@ function updateAvatar(userId, file, meta = {}) {
   return getProfile(userId);
 }
 
-function removeAvatar(userId, meta = {}) {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+async function removeAvatar(userId, meta = {}) {
+  const user = await db.one('SELECT * FROM users WHERE id = $1', [userId]);
 
   if (!user) {
     throw new AppError('User not found', 404);
@@ -288,15 +285,15 @@ function removeAvatar(userId, meta = {}) {
   }
 
   const previousAvatar = user.avatar_url;
-  const now = new Date().toISOString();
 
-  db.prepare(
-    `UPDATE users SET avatar_url = NULL, updated_at = ? WHERE id = ?`
-  ).run(now, userId);
+  await db.execute(
+    `UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1`,
+    [userId]
+  );
 
-  deleteAvatarFile(previousAvatar);
+  await deleteAvatarBlob(previousAvatar);
 
-  logActivity(userId, 'auth.avatar_remove', {
+  await logActivity(userId, 'auth.avatar_remove', {
     ipAddress: meta.ipAddress,
     userAgent: meta.userAgent,
   });

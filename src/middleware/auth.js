@@ -2,7 +2,7 @@ const db = require('../config/db');
 const AppError = require('../utils/AppError');
 const { verifyAccessToken } = require('../utils/jwt');
 
-function authenticate(req, _res, next) {
+async function authenticate(req, _res, next) {
   const header = req.get('authorization') || '';
   const [scheme, token] = header.split(' ');
 
@@ -12,9 +12,10 @@ function authenticate(req, _res, next) {
 
   try {
     const payload = verifyAccessToken(token);
-    const user = db
-      .prepare('SELECT id, email, role, is_active FROM users WHERE id = ?')
-      .get(payload.sub);
+    const user = await db.one(
+      'SELECT id, email, role, is_active FROM users WHERE id = $1',
+      [payload.sub]
+    );
 
     if (!user || !user.is_active) {
       return next(new AppError('Invalid or inactive account', 401));

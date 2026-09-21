@@ -2,7 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../config/db');
 
-async function migrate() {
+async function migrate(options = {}) {
+  const quiet = Boolean(options.quiet);
   await db.ready();
 
   const schemaPath = path.join(__dirname, 'schema.sql');
@@ -19,44 +20,51 @@ async function migrate() {
   ];
 
   if (reset) {
-    db.exec('PRAGMA foreign_keys = OFF;');
-    for (const table of tables) {
-      db.exec(`DROP TABLE IF EXISTS ${table};`);
-    }
-    db.exec('PRAGMA foreign_keys = ON;');
-    console.log('Dropped existing tables.');
+    await db.execute('DROP TABLE IF EXISTS activity_logs CASCADE');
+    await db.execute('DROP TABLE IF EXISTS shares CASCADE');
+    await db.execute('DROP TABLE IF EXISTS file_versions CASCADE');
+    await db.execute('DROP TABLE IF EXISTS files CASCADE');
+    await db.execute('DROP TABLE IF EXISTS folders CASCADE');
+    await db.execute('DROP TABLE IF EXISTS refresh_tokens CASCADE');
+    await db.execute('DROP TABLE IF EXISTS users CASCADE');
+    if (!quiet) console.log('Dropped existing tables.');
   }
 
   const schema = fs.readFileSync(schemaPath, 'utf8');
-  db.exec(schema);
+  await db.execute(schema);
 
-  // Additive column migrations for existing databases
-  const userColumns = db
-    .prepare('PRAGMA table_info(users)')
-    .all()
-    .map((row) => row.name);
+  const tableList = await db.many(
+    `SELECT table_name AS name
+     FROM information_schema.tables
+     WHERE table_schema = 'public'
+       AND table_type = 'BASE TABLE'
+     ORDER BY table_name`
+  );
 
-  if (!userColumns.includes('bio')) {
-    db.exec('ALTER TABLE users ADD COLUMN bio TEXT;');
-    console.log('Added users.bio column.');
+  if (!quiet) {
+    console.log(
+      'Migration complete. Tables:',
+      tableList.map((row) => row.name).join(', ')
+    );
   }
 
-  const tableList = db
-    .prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-    )
-    .all()
-    .map((row) => row.name);
-
-  console.log('Migration complete. Tables:', tableList.join(', '));
-  console.log('Database file:', db.path);
+  return tables;
 }
 
 if (require.main === module) {
-  migrate().catch((error) => {
-    console.error(error);
-    process.exit(1);
-  });
+  migrate()
+    .then(async () => {
+      await db.end();
+    })
+    .catch(async (error) => {
+      console.error(error);
+      try {
+        await db.end();
+      } catch (_endError) {
+        // ignore
+      }
+      process.exit(1);
+    });
 }
 
 module.exports = migrate;

@@ -36,7 +36,7 @@ async function login(req, res, next) {
 
 async function me(req, res, next) {
   try {
-    const user = authService.getProfile(req.user.id);
+    const user = await authService.getProfile(req.user.id);
     return res.status(200).json({
       success: true,
       data: { user },
@@ -48,7 +48,7 @@ async function me(req, res, next) {
 
 async function updateProfile(req, res, next) {
   try {
-    const user = authService.updateProfile(
+    const user = await authService.updateProfile(
       req.user.id,
       {
         fullName: req.body.fullName,
@@ -68,7 +68,7 @@ async function updateProfile(req, res, next) {
 
 async function uploadAvatar(req, res, next) {
   try {
-    const user = authService.updateAvatar(
+    const user = await authService.updateAvatar(
       req.user.id,
       req.file,
       requestMeta(req)
@@ -85,7 +85,7 @@ async function uploadAvatar(req, res, next) {
 
 async function deleteAvatar(req, res, next) {
   try {
-    const user = authService.removeAvatar(req.user.id, requestMeta(req));
+    const user = await authService.removeAvatar(req.user.id, requestMeta(req));
     return res.status(200).json({
       success: true,
       message: 'Avatar removed successfully',

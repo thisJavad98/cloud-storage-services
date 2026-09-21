@@ -1,7 +1,7 @@
 # Cloud Storage — Project Documentation
 
 **File:** `doc.md`  
-**Updated:** 2026-09-20  
+**Updated:** 2026-09-21  
 **Repos:**
 - Backend: `cloud-storage-services`
 - Frontend: `cloud-storage`
@@ -13,9 +13,10 @@
 A personal cloud-storage product with:
 
 - JWT auth (signup / login / profile)
-- File upload & CRUD (metadata in SQLite, bytes on disk)
+- File upload & CRUD (metadata in **Neon Postgres**, bytes in **Vercel Blob**)
 - Folders
 - A Persian RTL mobile-style Next.js UI
+- Deployable as **two Vercel projects** (API + web)
 
 ---
 
@@ -26,9 +27,10 @@ A personal cloud-storage product with:
 | Technology | Role |
 |---|---|
 | **Node.js** (≥18 recommended) | Runtime |
-| **Express.js 4** | HTTP API framework |
-| **sql.js** | SQLite in WASM (no native build); DB file at `./data/cloud-storage.db` |
-| **multer 2.x** | Multipart file uploads |
+| **Express.js 4** | HTTP API framework (local `src/server.js` + Vercel `api/index.js`) |
+| **Neon Postgres** (`@neondatabase/serverless`) | Durable metadata DB |
+| **Vercel Blob** (`@vercel/blob`) | File / avatar object storage |
+| **multer 2.x** | Avatar multipart (memory → Blob), ≤2MB |
 | **bcryptjs** | Password hashing |
 | **jsonwebtoken** | Access + refresh tokens |
 | **dotenv** | Environment config |
@@ -37,9 +39,10 @@ A personal cloud-storage product with:
 | **uuid** | IDs for users, files, folders |
 
 **Storage model (important):**
-- File **metadata** → SQLite tables (`files`, `folders`, …)
-- File **content** → filesystem under `./uploads` (key stored as `storage_key`)
-- Not BLOB-in-DB — matches the schema design (`storage_key` column)
+- File **metadata** → Postgres tables (`files`, `folders`, …)
+- File **content** → Vercel Blob (`storage_key` holds the public Blob URL)
+- Library uploads: browser → Blob via `@vercel/blob/client`, then `POST /api/files/complete`
+- Avatars: `POST /api/auth/avatar` → Blob; `avatar_url` is an HTTPS URL
 
 ### Frontend (`cloud-storage`)
 
@@ -49,7 +52,19 @@ A personal cloud-storage product with:
 | **React 19** | Components |
 | **Tailwind CSS v4** | Styling + design tokens (`cs-blue`, …) |
 | **Vazirmatn** | Persian font, RTL layout |
+| **@vercel/blob/client** | Direct client uploads to Blob |
 | **localStorage session** | Tokens + user (`cs_access_token`, …) |
+
+---
+
+## 2b. Vercel deploy (two projects)
+
+1. Neon DB → `DATABASE_URL`
+2. Deploy API repo on Vercel → enable Blob → set `DATABASE_URL`, `BLOB_READ_WRITE_TOKEN`, `FRONTEND_ORIGIN`, JWT secrets → `npm run db:migrate`
+3. Deploy frontend repo → `NEXT_PUBLIC_API_URL=https://<api>.vercel.app/api`
+4. Set API `FRONTEND_ORIGIN` to the frontend URL
+
+See each repo README for full steps.
 
 ---
 
@@ -62,13 +77,14 @@ A personal cloud-storage product with:
 - Started API on `http://localhost:4000`
 - Verified health + signup
 
-**Env vars:**
+**Env vars (current):**
 
 ```bash
 PORT=4000
 NODE_ENV=development
-DB_PATH=./data/cloud-storage.db
-STORAGE_PATH=./uploads
+DATABASE_URL=postgresql://...
+BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...
+FRONTEND_ORIGIN=http://localhost:3000
 MAX_UPLOAD_BYTES=104857600
 JWT_ACCESS_SECRET=dev-access-secret
 JWT_REFRESH_SECRET=dev-refresh-secret
@@ -89,15 +105,15 @@ Created account:
 
 | Path | Purpose |
 |---|---|
-| `src/services/files.service.js` | Upload, list, get, update, trash, restore, delete, folders |
-| `src/controllers/files.controller.js` | HTTP adapters |
-| `src/routes/files.routes.js` | Auth + multer + routes |
-| `src/config/storage.js` | Upload directory helpers |
-| `src/config/env.js` | `STORAGE_PATH`, `MAX_UPLOAD_BYTES` |
+| `src/services/files.service.js` | Upload register, list, get, update, trash, restore, delete, folders |
+| `src/controllers/files.controller.js` | HTTP adapters + Blob `handleUpload` |
+| `src/routes/files.routes.js` | Auth + Blob upload/complete routes |
+| `src/config/storage.js` | Vercel Blob helpers |
+| `src/config/env.js` | `DATABASE_URL`, Blob, CORS, quotas |
 | `src/routes/index.js` | Mount `/api/files` |
-| `src/app.js` | CORS-friendly helmet for downloads |
+| `src/app.js` | CORS via `FRONTEND_ORIGIN` |
 | `src/middleware/validate.js` | File/folder validation rules |
-| `uploads/` | Stored file bytes (gitignored) |
+| `api/index.js` / `vercel.json` | Vercel serverless entry |
 
 **API endpoints (all need `Authorization: Bearer <accessToken>` except auth):**
 

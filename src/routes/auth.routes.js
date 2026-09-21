@@ -1,7 +1,5 @@
-const path = require('path');
 const multer = require('multer');
 const express = require('express');
-const { v4: uuidv4 } = require('uuid');
 const authController = require('../controllers/auth.controller');
 const { authenticate } = require('../middleware/auth');
 const {
@@ -10,24 +8,13 @@ const {
   updateProfileRules,
   validate,
 } = require('../middleware/validate');
-const { ensureAvatarsRoot } = require('../config/storage');
 const config = require('../config/env');
 const AppError = require('../utils/AppError');
 
 const router = express.Router();
 
-const avatarStorage = multer.diskStorage({
-  destination(_req, _file, cb) {
-    cb(null, ensureAvatarsRoot());
-  },
-  filename(_req, file, cb) {
-    const ext = path.extname(file.originalname || '').slice(0, 32) || '.jpg';
-    cb(null, `${uuidv4()}${ext}`);
-  },
-});
-
 const avatarUpload = multer({
-  storage: avatarStorage,
+  storage: multer.memoryStorage(),
   limits: {
     fileSize: config.maxAvatarBytes,
     files: 1,

@@ -1,10 +1,14 @@
-const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/db');
-const { absolutePathForKey, ensureStorageRoot } = require('../config/storage');
+const config = require('../config/env');
+const { deleteBlob } = require('../config/storage');
 const AppError = require('../utils/AppError');
+
+function toIso(value) {
+  if (!value) return value;
+  if (value instanceof Date) return value.toISOString();
+  return value;
+}
 
 function publicFile(row) {
   if (!row) return null;
@@ -15,14 +19,14 @@ function publicFile(row) {
     folderId: row.folder_id,
     name: row.name,
     mimeType: row.mime_type,
-    sizeBytes: row.size_bytes,
+    sizeBytes: Number(row.size_bytes),
     storageKey: row.storage_key,
     checksumSha256: row.checksum_sha256,
     version: row.version,
     isTrashed: Boolean(row.is_trashed),
-    trashedAt: row.trashed_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    trashedAt: toIso(row.trashed_at),
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
   };
 }
 
@@ -36,15 +40,15 @@ function publicFolder(row) {
     name: row.name,
     path: row.path,
     isTrashed: Boolean(row.is_trashed),
-    trashedAt: row.trashed_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    trashedAt: toIso(row.trashed_at),
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
     fileCount: row.file_count != null ? Number(row.file_count) : undefined,
   };
 }
 
-function getUserOrThrow(userId) {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+async function getUserOrThrow(userId) {
+  const user = await db.one('SELECT * FROM users WHERE id = $1', [userId]);
   if (!user) {
     throw new AppError('User not found', 404);
   }
@@ -54,10 +58,11 @@ function getUserOrThrow(userId) {
   return user;
 }
 
-function getOwnedFileOrThrow(userId, fileId, { includeTrashed = true } = {}) {
-  const file = db
-    .prepare('SELECT * FROM files WHERE id = ? AND user_id = ?')
-    .get(fileId, userId);
+async function getOwnedFileOrThrow(userId, fileId, { includeTrashed = true } = {}) {
+  const file = await db.one(
+    'SELECT * FROM files WHERE id = $1 AND user_id = $2',
+    [fileId, userId]
+  );
 
   if (!file) {
     throw new AppError('File not found', 404);
@@ -70,15 +75,14 @@ function getOwnedFileOrThrow(userId, fileId, { includeTrashed = true } = {}) {
   return file;
 }
 
-function assertFolderOwned(userId, folderId) {
+async function assertFolderOwned(userId, folderId) {
   if (!folderId) return null;
 
-  const folder = db
-    .prepare(
-      `SELECT * FROM folders
-       WHERE id = ? AND user_id = ? AND is_trashed = 0`
-    )
-    .get(folderId, userId);
+  const folder = await db.one(
+    `SELECT * FROM folders
+     WHERE id = $1 AND user_id = $2 AND is_trashed = FALSE`,
+    [folderId, userId]
+  );
 
   if (!folder) {
     throw new AppError('Folder not found', 404);
@@ -87,17 +91,16 @@ function assertFolderOwned(userId, folderId) {
   return folder;
 }
 
-function findNameConflict(userId, folderId, name, excludeId = null) {
-  const row = db
-    .prepare(
-      `SELECT id FROM files
-       WHERE user_id = ?
-         AND ((folder_id IS NULL AND ? IS NULL) OR folder_id = ?)
-         AND name = ?
-         AND is_trashed = 0
-         AND (? IS NULL OR id != ?)`
-    )
-    .get(userId, folderId, folderId, name, excludeId, excludeId);
+async function findNameConflict(userId, folderId, name, excludeId = null) {
+  const row = await db.one(
+    `SELECT id FROM files
+     WHERE user_id = $1
+       AND folder_id IS NOT DISTINCT FROM $2
+       AND name = $3
+       AND is_trashed = FALSE
+       AND ($4::text IS NULL OR id != $4)`,
+    [userId, folderId, name, excludeId]
+  );
 
   return Boolean(row);
 }
@@ -115,109 +118,131 @@ function sanitizeFileName(name) {
   return cleaned.slice(0, 255);
 }
 
-function logActivity(userId, action, meta = {}) {
-  db.prepare(
+async function logActivity(userId, action, meta = {}) {
+  await db.execute(
     `INSERT INTO activity_logs (id, user_id, action, resource_type, resource_id, ip_address, user_agent, metadata)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    uuidv4(),
-    userId,
-    action,
-    meta.resourceType || 'file',
-    meta.resourceId || null,
-    meta.ipAddress || null,
-    meta.userAgent || null,
-    meta.metadata ? JSON.stringify(meta.metadata) : null
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      uuidv4(),
+      userId,
+      action,
+      meta.resourceType || 'file',
+      meta.resourceId || null,
+      meta.ipAddress || null,
+      meta.userAgent || null,
+      meta.metadata ? JSON.stringify(meta.metadata) : null,
+    ]
   );
 }
 
-function removeStoredFile(storageKey) {
-  try {
-    const absolute = absolutePathForKey(storageKey);
-    if (fs.existsSync(absolute)) {
-      fs.unlinkSync(absolute);
-    }
-  } catch {
-    // Best-effort cleanup; DB remains source of truth for metadata.
-  }
+async function removeStoredFile(storageKey) {
+  await deleteBlob(storageKey);
 }
 
-function uploadFile(userId, uploaded, options = {}, meta = {}) {
-  if (!uploaded || !uploaded.path) {
-    throw new AppError('File is required', 400);
-  }
-
-  const user = getUserOrThrow(userId);
+async function validateUploadIntent(userId, options = {}) {
+  const user = await getUserOrThrow(userId);
   const folderId = options.folderId || null;
-  assertFolderOwned(userId, folderId);
+  await assertFolderOwned(userId, folderId);
 
-  const name = sanitizeFileName(options.name || uploaded.originalname);
-  const sizeBytes = Number(uploaded.size) || 0;
-  const mimeType = uploaded.mimetype || 'application/octet-stream';
+  const name = sanitizeFileName(options.name || options.originalName || 'upload');
+  const sizeBytes = Number(options.sizeBytes) || 0;
 
-  if (findNameConflict(userId, folderId, name)) {
-    removeStoredFile(path.basename(uploaded.path));
+  if (await findNameConflict(userId, folderId, name)) {
     throw new AppError('A file with this name already exists in this folder', 409);
   }
 
-  if (user.storage_used_bytes + sizeBytes > user.storage_quota_bytes) {
-    removeStoredFile(path.basename(uploaded.path));
+  if (sizeBytes > 0 && Number(user.storage_used_bytes) + sizeBytes > Number(user.storage_quota_bytes)) {
     throw new AppError('Storage quota exceeded', 413);
   }
 
-  const fileBuffer = fs.readFileSync(uploaded.path);
-  const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-  const fileId = uuidv4();
-  const storageKey = path.basename(uploaded.path);
-  const now = new Date().toISOString();
+  const remaining =
+    Number(user.storage_quota_bytes) - Number(user.storage_used_bytes);
 
-  const write = db.transaction(() => {
-    db.prepare(
-      `INSERT INTO files (
-         id, user_id, folder_id, name, mime_type, size_bytes,
-         storage_key, checksum_sha256, version, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
-    ).run(
-      fileId,
-      userId,
-      folderId,
-      name,
-      mimeType,
-      sizeBytes,
-      storageKey,
-      checksum,
-      now,
-      now
-    );
+  return {
+    user,
+    folderId,
+    name,
+    remainingBytes: Math.max(remaining, 0),
+    maxUploadBytes: Math.min(config.maxUploadBytes, Math.max(remaining, 0)),
+  };
+}
 
-    db.prepare(
-      `UPDATE users
-       SET storage_used_bytes = storage_used_bytes + ?, updated_at = ?
-       WHERE id = ?`
-    ).run(sizeBytes, now, userId);
+async function registerUploadedFile(userId, blobMeta = {}, options = {}, meta = {}) {
+  if (!blobMeta.url && !blobMeta.pathname) {
+    throw new AppError('Uploaded blob is required', 400);
+  }
+
+  const storageKey = blobMeta.url || blobMeta.pathname;
+  const existing = await db.one(
+    'SELECT * FROM files WHERE storage_key = $1',
+    [storageKey]
+  );
+  if (existing) {
+    return publicFile(existing);
+  }
+
+  const intent = await validateUploadIntent(userId, {
+    folderId: options.folderId,
+    name: options.name || blobMeta.pathname,
+    sizeBytes: blobMeta.size || options.sizeBytes || 0,
+    originalName: options.name,
   });
 
+  const sizeBytes = Number(blobMeta.size) || Number(options.sizeBytes) || 0;
+  const mimeType =
+    blobMeta.contentType || options.mimeType || 'application/octet-stream';
+  const fileId = uuidv4();
+
+  if (Number(intent.user.storage_used_bytes) + sizeBytes > Number(intent.user.storage_quota_bytes)) {
+    await removeStoredFile(storageKey);
+    throw new AppError('Storage quota exceeded', 413);
+  }
+
   try {
-    write();
+    await db.transaction(async (tx) => {
+      await tx.execute(
+        `INSERT INTO files (
+           id, user_id, folder_id, name, mime_type, size_bytes,
+           storage_key, checksum_sha256, version
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)`,
+        [
+          fileId,
+          userId,
+          intent.folderId,
+          intent.name,
+          mimeType,
+          sizeBytes,
+          storageKey,
+          options.checksumSha256 || null,
+        ]
+      );
+
+      await tx.execute(
+        `UPDATE users
+         SET storage_used_bytes = storage_used_bytes + $1, updated_at = NOW()
+         WHERE id = $2`,
+        [sizeBytes, userId]
+      );
+    });
   } catch (error) {
-    removeStoredFile(storageKey);
+    await removeStoredFile(storageKey);
     throw error;
   }
 
-  const file = db.prepare('SELECT * FROM files WHERE id = ?').get(fileId);
+  const file = await db.one('SELECT * FROM files WHERE id = $1', [fileId]);
 
-  logActivity(userId, 'file.upload', {
+  await logActivity(userId, 'file.upload', {
     resourceId: fileId,
     ipAddress: meta.ipAddress,
     userAgent: meta.userAgent,
-    metadata: { name, sizeBytes, mimeType },
+    metadata: { name: intent.name, sizeBytes, mimeType },
   });
 
   return publicFile(file);
 }
 
-function listFiles(userId, query = {}) {
-  getUserOrThrow(userId);
+async function listFiles(userId, query = {}) {
+  await getUserOrThrow(userId);
 
   const includeTrashed = query.trashed === true || query.trashed === 'true';
   let folderId;
@@ -232,7 +257,7 @@ function listFiles(userId, query = {}) {
     folderId = null;
   } else {
     folderId = query.folderId;
-    assertFolderOwned(userId, folderId);
+    await assertFolderOwned(userId, folderId);
   }
 
   const search = typeof query.search === 'string' ? query.search.trim() : '';
@@ -251,111 +276,112 @@ function listFiles(userId, query = {}) {
   const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
   const offset = Math.max(Number(query.offset) || 0, 0);
 
-  const where = ['user_id = ?'];
+  const where = ['user_id = $1'];
   const params = [userId];
 
   if (includeTrashed) {
-    where.push('is_trashed = 1');
+    where.push('is_trashed = TRUE');
   } else {
-    where.push('is_trashed = 0');
+    where.push('is_trashed = FALSE');
   }
 
   if (folderId !== undefined) {
-    where.push('((folder_id IS NULL AND ? IS NULL) OR folder_id = ?)');
-    params.push(folderId, folderId);
+    params.push(folderId);
+    where.push(`folder_id IS NOT DISTINCT FROM $${params.length}`);
   }
 
   if (search) {
-    where.push('LOWER(name) LIKE ?');
     params.push(`%${search.toLowerCase()}%`);
+    where.push(`LOWER(name) LIKE $${params.length}`);
   }
 
   if (mimeType) {
     if (mimeType.endsWith('/')) {
-      where.push('LOWER(mime_type) LIKE ?');
       params.push(`${mimeType}%`);
+      where.push(`LOWER(mime_type) LIKE $${params.length}`);
     } else {
-      where.push('LOWER(mime_type) = ?');
       params.push(mimeType);
+      where.push(`LOWER(mime_type) = $${params.length}`);
     }
   }
 
   if (minSize !== null) {
-    where.push('size_bytes >= ?');
     params.push(minSize);
+    where.push(`size_bytes >= $${params.length}`);
   }
 
   if (maxSize !== null) {
-    where.push('size_bytes <= ?');
     params.push(maxSize);
+    where.push(`size_bytes <= $${params.length}`);
   }
 
-  const rows = db
-    .prepare(
-      `SELECT * FROM files
-       WHERE ${where.join(' AND ')}
-       ORDER BY updated_at DESC
-       LIMIT ? OFFSET ?`
-    )
-    .all(...params, limit, offset);
+  const whereSql = where.join(' AND ');
+  const limitParam = params.length + 1;
+  const offsetParam = params.length + 2;
 
-  const total = db
-    .prepare(
-      `SELECT COUNT(*) AS count FROM files WHERE ${where.join(' AND ')}`
-    )
-    .get(...params).count;
+  const rows = await db.many(
+    `SELECT * FROM files
+     WHERE ${whereSql}
+     ORDER BY updated_at DESC
+     LIMIT $${limitParam} OFFSET $${offsetParam}`,
+    [...params, limit, offset]
+  );
+
+  const totalRow = await db.one(
+    `SELECT COUNT(*)::int AS count FROM files WHERE ${whereSql}`,
+    params
+  );
 
   return {
     files: rows.map(publicFile),
     pagination: {
-      total: Number(total),
+      total: Number(totalRow.count),
       limit,
       offset,
     },
   };
 }
 
-function getFile(userId, fileId) {
-  return publicFile(getOwnedFileOrThrow(userId, fileId));
+async function getFile(userId, fileId) {
+  return publicFile(await getOwnedFileOrThrow(userId, fileId));
 }
 
-function getDownloadTarget(userId, fileId) {
-  const file = getOwnedFileOrThrow(userId, fileId, { includeTrashed: false });
-  const absolutePath = absolutePathForKey(file.storage_key);
+async function getDownloadTarget(userId, fileId) {
+  const file = await getOwnedFileOrThrow(userId, fileId, { includeTrashed: false });
 
-  if (!fs.existsSync(absolutePath)) {
+  if (!file.storage_key) {
     throw new AppError('Stored file content is missing', 404);
   }
 
   return {
     file: publicFile(file),
-    absolutePath,
+    downloadUrl: file.storage_key,
   };
 }
 
-function updateFile(userId, fileId, payload = {}, meta = {}) {
-  const file = getOwnedFileOrThrow(userId, fileId, { includeTrashed: false });
+async function updateFile(userId, fileId, payload = {}, meta = {}) {
+  const file = await getOwnedFileOrThrow(userId, fileId, { includeTrashed: false });
   const nextName =
     payload.name !== undefined ? sanitizeFileName(payload.name) : file.name;
   const nextFolderId =
     payload.folderId !== undefined ? payload.folderId || null : file.folder_id;
 
-  assertFolderOwned(userId, nextFolderId);
+  await assertFolderOwned(userId, nextFolderId);
 
-  if (findNameConflict(userId, nextFolderId, nextName, file.id)) {
+  if (await findNameConflict(userId, nextFolderId, nextName, file.id)) {
     throw new AppError('A file with this name already exists in this folder', 409);
   }
 
-  const now = new Date().toISOString();
-  db.prepare(
+  await db.execute(
     `UPDATE files
-     SET name = ?, folder_id = ?, updated_at = ?
-     WHERE id = ? AND user_id = ?`
-  ).run(nextName, nextFolderId, now, fileId, userId);
+     SET name = $1, folder_id = $2, updated_at = NOW()
+     WHERE id = $3 AND user_id = $4`,
+    [nextName, nextFolderId, fileId, userId]
+  );
 
-  const updated = db.prepare('SELECT * FROM files WHERE id = ?').get(fileId);
+  const updated = await db.one('SELECT * FROM files WHERE id = $1', [fileId]);
 
-  logActivity(userId, 'file.update', {
+  await logActivity(userId, 'file.update', {
     resourceId: fileId,
     ipAddress: meta.ipAddress,
     userAgent: meta.userAgent,
@@ -365,92 +391,85 @@ function updateFile(userId, fileId, payload = {}, meta = {}) {
   return publicFile(updated);
 }
 
-function trashFile(userId, fileId, meta = {}) {
-  const file = getOwnedFileOrThrow(userId, fileId, { includeTrashed: false });
-  const now = new Date().toISOString();
+async function trashFile(userId, fileId, meta = {}) {
+  await getOwnedFileOrThrow(userId, fileId, { includeTrashed: false });
 
-  db.prepare(
+  await db.execute(
     `UPDATE files
-     SET is_trashed = 1, trashed_at = ?, updated_at = ?
-     WHERE id = ? AND user_id = ?`
-  ).run(now, now, fileId, userId);
+     SET is_trashed = TRUE, trashed_at = NOW(), updated_at = NOW()
+     WHERE id = $1 AND user_id = $2`,
+    [fileId, userId]
+  );
 
-  logActivity(userId, 'file.trash', {
+  await logActivity(userId, 'file.trash', {
     resourceId: fileId,
     ipAddress: meta.ipAddress,
     userAgent: meta.userAgent,
   });
 
-  return publicFile(db.prepare('SELECT * FROM files WHERE id = ?').get(fileId));
+  return publicFile(await db.one('SELECT * FROM files WHERE id = $1', [fileId]));
 }
 
-function restoreFile(userId, fileId, meta = {}) {
-  const file = getOwnedFileOrThrow(userId, fileId);
+async function restoreFile(userId, fileId, meta = {}) {
+  const file = await getOwnedFileOrThrow(userId, fileId);
 
   if (!file.is_trashed) {
     throw new AppError('File is not in trash', 400);
   }
 
-  if (findNameConflict(userId, file.folder_id, file.name, file.id)) {
+  if (await findNameConflict(userId, file.folder_id, file.name, file.id)) {
     throw new AppError('A file with this name already exists in this folder', 409);
   }
 
-  const now = new Date().toISOString();
-  db.prepare(
+  await db.execute(
     `UPDATE files
-     SET is_trashed = 0, trashed_at = NULL, updated_at = ?
-     WHERE id = ? AND user_id = ?`
-  ).run(now, fileId, userId);
+     SET is_trashed = FALSE, trashed_at = NULL, updated_at = NOW()
+     WHERE id = $1 AND user_id = $2`,
+    [fileId, userId]
+  );
 
-  logActivity(userId, 'file.restore', {
+  await logActivity(userId, 'file.restore', {
     resourceId: fileId,
     ipAddress: meta.ipAddress,
     userAgent: meta.userAgent,
   });
 
-  return publicFile(db.prepare('SELECT * FROM files WHERE id = ?').get(fileId));
+  return publicFile(await db.one('SELECT * FROM files WHERE id = $1', [fileId]));
 }
 
-function deleteFilePermanent(userId, fileId, meta = {}) {
-  const file = getOwnedFileOrThrow(userId, fileId);
-  const now = new Date().toISOString();
+async function deleteFilePermanent(userId, fileId, meta = {}) {
+  const file = await getOwnedFileOrThrow(userId, fileId);
 
-  const remove = db.transaction(() => {
-    db.prepare('DELETE FROM files WHERE id = ? AND user_id = ?').run(fileId, userId);
+  await db.transaction(async (tx) => {
+    await tx.execute('DELETE FROM files WHERE id = $1 AND user_id = $2', [
+      fileId,
+      userId,
+    ]);
 
-    if (!file.is_trashed) {
-      db.prepare(
-        `UPDATE users
-         SET storage_used_bytes = MAX(storage_used_bytes - ?, 0), updated_at = ?
-         WHERE id = ?`
-      ).run(file.size_bytes, now, userId);
-    } else {
-      // Trashed files still counted in usage until permanently deleted.
-      db.prepare(
-        `UPDATE users
-         SET storage_used_bytes = MAX(storage_used_bytes - ?, 0), updated_at = ?
-         WHERE id = ?`
-      ).run(file.size_bytes, now, userId);
-    }
+    await tx.execute(
+      `UPDATE users
+       SET storage_used_bytes = GREATEST(storage_used_bytes - $1, 0), updated_at = NOW()
+       WHERE id = $2`,
+      [file.size_bytes, userId]
+    );
   });
 
-  remove();
-  removeStoredFile(file.storage_key);
+  await removeStoredFile(file.storage_key);
 
-  logActivity(userId, 'file.delete', {
+  await logActivity(userId, 'file.delete', {
     resourceId: fileId,
     ipAddress: meta.ipAddress,
     userAgent: meta.userAgent,
-    metadata: { name: file.name, sizeBytes: file.size_bytes },
+    metadata: { name: file.name, sizeBytes: Number(file.size_bytes) },
   });
 
   return { id: fileId, deleted: true };
 }
 
-function listFolders(userId, query = {}) {
-  getUserOrThrow(userId);
+async function listFolders(userId, query = {}) {
+  await getUserOrThrow(userId);
 
-  const where = ['f.user_id = ?', 'f.is_trashed = 0', "f.path != '/'"];
+  const where = ['f.user_id = $1', 'f.is_trashed = FALSE', "f.path != '/'"];
   const params = [userId];
 
   if (query.parentId !== undefined) {
@@ -462,37 +481,36 @@ function listFolders(userId, query = {}) {
     ) {
       where.push('f.parent_id IS NULL');
     } else {
-      assertFolderOwned(userId, query.parentId);
-      where.push('f.parent_id = ?');
+      await assertFolderOwned(userId, query.parentId);
       params.push(query.parentId);
+      where.push(`f.parent_id = $${params.length}`);
     }
   }
 
   const search = typeof query.search === 'string' ? query.search.trim() : '';
   if (search) {
-    where.push('LOWER(f.name) LIKE ?');
     params.push(`%${search.toLowerCase()}%`);
+    where.push(`LOWER(f.name) LIKE $${params.length}`);
   }
 
-  const rows = db
-    .prepare(
-      `SELECT f.*,
-              (
-                SELECT COUNT(*) FROM files fi
-                WHERE fi.folder_id = f.id
-                  AND fi.user_id = f.user_id
-                  AND fi.is_trashed = 0
-              ) AS file_count
-       FROM folders f
-       WHERE ${where.join(' AND ')}
-       ORDER BY f.name ASC`
-    )
-    .all(...params);
+  const rows = await db.many(
+    `SELECT f.*,
+            (
+              SELECT COUNT(*)::int FROM files fi
+              WHERE fi.folder_id = f.id
+                AND fi.user_id = f.user_id
+                AND fi.is_trashed = FALSE
+            ) AS file_count
+     FROM folders f
+     WHERE ${where.join(' AND ')}
+     ORDER BY f.name ASC`,
+    params
+  );
 
   return rows.map(publicFolder);
 }
 
-function searchLibrary(userId, query = {}) {
+async function searchLibrary(userId, query = {}) {
   const rawQ =
     typeof query.q === 'string'
       ? query.q
@@ -524,17 +542,21 @@ function searchLibrary(userId, query = {}) {
   }
 
   let files = [];
-  let pagination = { total: 0, limit, offset: Math.max(Number(query.offset) || 0, 0) };
+  let pagination = {
+    total: 0,
+    limit,
+    offset: Math.max(Number(query.offset) || 0, 0),
+  };
   let folders = [];
 
   if (scope === 'all' || scope === 'files') {
-    const result = listFiles(userId, fileQuery);
+    const result = await listFiles(userId, fileQuery);
     files = result.files;
     pagination = result.pagination;
   }
 
   if (scope === 'all' || scope === 'folders') {
-    folders = listFolders(userId, folderQuery).slice(0, limit);
+    folders = (await listFolders(userId, folderQuery)).slice(0, limit);
   }
 
   return {
@@ -544,22 +566,21 @@ function searchLibrary(userId, query = {}) {
   };
 }
 
-function getFolder(userId, folderId) {
-  getUserOrThrow(userId);
+async function getFolder(userId, folderId) {
+  await getUserOrThrow(userId);
 
-  const folder = db
-    .prepare(
-      `SELECT f.*,
-              (
-                SELECT COUNT(*) FROM files fi
-                WHERE fi.folder_id = f.id
-                  AND fi.user_id = f.user_id
-                  AND fi.is_trashed = 0
-              ) AS file_count
-       FROM folders f
-       WHERE f.id = ? AND f.user_id = ? AND f.is_trashed = 0`
-    )
-    .get(folderId, userId);
+  const folder = await db.one(
+    `SELECT f.*,
+            (
+              SELECT COUNT(*)::int FROM files fi
+              WHERE fi.folder_id = f.id
+                AND fi.user_id = f.user_id
+                AND fi.is_trashed = FALSE
+            ) AS file_count
+     FROM folders f
+     WHERE f.id = $1 AND f.user_id = $2 AND f.is_trashed = FALSE`,
+    [folderId, userId]
+  );
 
   if (!folder || folder.path === '/') {
     throw new AppError('Folder not found', 404);
@@ -568,21 +589,20 @@ function getFolder(userId, folderId) {
   return publicFolder(folder);
 }
 
-function updateFolder(userId, folderId, payload = {}, meta = {}) {
-  const folder = getFolder(userId, folderId);
+async function updateFolder(userId, folderId, payload = {}, meta = {}) {
+  const folder = await getFolder(userId, folderId);
   const nextName =
     payload.name !== undefined ? sanitizeFileName(payload.name) : folder.name;
 
-  const existing = db
-    .prepare(
-      `SELECT id FROM folders
-       WHERE user_id = ?
-         AND ((parent_id IS NULL AND ? IS NULL) OR parent_id = ?)
-         AND name = ?
-         AND is_trashed = 0
-         AND id != ?`
-    )
-    .get(userId, folder.parentId, folder.parentId, nextName, folderId);
+  const existing = await db.one(
+    `SELECT id FROM folders
+     WHERE user_id = $1
+       AND parent_id IS NOT DISTINCT FROM $2
+       AND name = $3
+       AND is_trashed = FALSE
+       AND id != $4`,
+    [userId, folder.parentId, nextName, folderId]
+  );
 
   if (existing) {
     throw new AppError('A folder with this name already exists', 409);
@@ -590,20 +610,20 @@ function updateFolder(userId, folderId, payload = {}, meta = {}) {
 
   let parentPath = '/';
   if (folder.parentId) {
-    const parent = assertFolderOwned(userId, folder.parentId);
+    const parent = await assertFolderOwned(userId, folder.parentId);
     parentPath = parent.path.endsWith('/') ? parent.path : `${parent.path}/`;
   }
 
   const nextPath = `${parentPath}${nextName}`;
-  const now = new Date().toISOString();
 
-  db.prepare(
+  await db.execute(
     `UPDATE folders
-     SET name = ?, path = ?, updated_at = ?
-     WHERE id = ? AND user_id = ?`
-  ).run(nextName, nextPath, now, folderId, userId);
+     SET name = $1, path = $2, updated_at = NOW()
+     WHERE id = $3 AND user_id = $4`,
+    [nextName, nextPath, folderId, userId]
+  );
 
-  logActivity(userId, 'folder.update', {
+  await logActivity(userId, 'folder.update', {
     resourceType: 'folder',
     resourceId: folderId,
     ipAddress: meta.ipAddress,
@@ -614,47 +634,44 @@ function updateFolder(userId, folderId, payload = {}, meta = {}) {
   return getFolder(userId, folderId);
 }
 
-function deleteFolder(userId, folderId, meta = {}) {
-  const folder = getFolder(userId, folderId);
-  const now = new Date().toISOString();
+async function deleteFolder(userId, folderId, meta = {}) {
+  const folder = await getFolder(userId, folderId);
 
-  const childFolders = db
-    .prepare(
-      `SELECT id FROM folders
-       WHERE user_id = ? AND parent_id = ? AND is_trashed = 0`
-    )
-    .all(userId, folderId);
+  const childFolders = await db.many(
+    `SELECT id FROM folders
+     WHERE user_id = $1 AND parent_id = $2 AND is_trashed = FALSE`,
+    [userId, folderId]
+  );
 
   if (childFolders.length > 0) {
     throw new AppError('Folder has subfolders. Remove them first.', 400);
   }
 
-  const filesInFolder = db
-    .prepare(
-      `SELECT id FROM files
-       WHERE user_id = ? AND folder_id = ? AND is_trashed = 0`
-    )
-    .all(userId, folderId);
+  const filesInFolder = await db.many(
+    `SELECT id FROM files
+     WHERE user_id = $1 AND folder_id = $2 AND is_trashed = FALSE`,
+    [userId, folderId]
+  );
 
-  const remove = db.transaction(() => {
+  await db.transaction(async (tx) => {
     for (const file of filesInFolder) {
-      db.prepare(
+      await tx.execute(
         `UPDATE files
-         SET is_trashed = 1, trashed_at = ?, updated_at = ?
-         WHERE id = ? AND user_id = ?`
-      ).run(now, now, file.id, userId);
+         SET is_trashed = TRUE, trashed_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND user_id = $2`,
+        [file.id, userId]
+      );
     }
 
-    db.prepare(
+    await tx.execute(
       `UPDATE folders
-       SET is_trashed = 1, trashed_at = ?, updated_at = ?
-       WHERE id = ? AND user_id = ?`
-    ).run(now, now, folderId, userId);
+       SET is_trashed = TRUE, trashed_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND user_id = $2`,
+      [folderId, userId]
+    );
   });
 
-  remove();
-
-  logActivity(userId, 'folder.delete', {
+  await logActivity(userId, 'folder.delete', {
     resourceType: 'folder',
     resourceId: folderId,
     ipAddress: meta.ipAddress,
@@ -665,14 +682,14 @@ function deleteFolder(userId, folderId, meta = {}) {
   return { id: folderId, deleted: true, trashedFiles: filesInFolder.length };
 }
 
-function createFolder(userId, { name, parentId = null } = {}, meta = {}) {
-  getUserOrThrow(userId);
+async function createFolder(userId, { name, parentId = null } = {}, meta = {}) {
+  await getUserOrThrow(userId);
   const folderName = sanitizeFileName(name);
   let parentPath = '/';
   let resolvedParentId = parentId || null;
 
   if (resolvedParentId) {
-    const parent = assertFolderOwned(userId, resolvedParentId);
+    const parent = await assertFolderOwned(userId, resolvedParentId);
     if (parent.path === '/') {
       resolvedParentId = null;
       parentPath = '/';
@@ -681,16 +698,15 @@ function createFolder(userId, { name, parentId = null } = {}, meta = {}) {
     }
   }
 
-  const existing = db
-    .prepare(
-      `SELECT id FROM folders
-       WHERE user_id = ?
-         AND ((parent_id IS NULL AND ? IS NULL) OR parent_id = ?)
-         AND name = ?
-         AND is_trashed = 0
-         AND path != '/'`
-    )
-    .get(userId, resolvedParentId, resolvedParentId, folderName);
+  const existing = await db.one(
+    `SELECT id FROM folders
+     WHERE user_id = $1
+       AND parent_id IS NOT DISTINCT FROM $2
+       AND name = $3
+       AND is_trashed = FALSE
+       AND path != '/'`,
+    [userId, resolvedParentId, folderName]
+  );
 
   if (existing) {
     throw new AppError('A folder with this name already exists', 409);
@@ -698,14 +714,14 @@ function createFolder(userId, { name, parentId = null } = {}, meta = {}) {
 
   const folderId = uuidv4();
   const folderPath = `${parentPath}${folderName}`;
-  const now = new Date().toISOString();
 
-  db.prepare(
-    `INSERT INTO folders (id, user_id, parent_id, name, path, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(folderId, userId, resolvedParentId, folderName, folderPath, now, now);
+  await db.execute(
+    `INSERT INTO folders (id, user_id, parent_id, name, path)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [folderId, userId, resolvedParentId, folderName, folderPath]
+  );
 
-  logActivity(userId, 'folder.create', {
+  await logActivity(userId, 'folder.create', {
     resourceType: 'folder',
     resourceId: folderId,
     ipAddress: meta.ipAddress,
@@ -716,10 +732,9 @@ function createFolder(userId, { name, parentId = null } = {}, meta = {}) {
   return getFolder(userId, folderId);
 }
 
-ensureStorageRoot();
-
 module.exports = {
-  uploadFile,
+  validateUploadIntent,
+  registerUploadedFile,
   listFiles,
   searchLibrary,
   getFile,
@@ -735,4 +750,5 @@ module.exports = {
   deleteFolder,
   publicFile,
   publicFolder,
+  sanitizeFileName,
 };
