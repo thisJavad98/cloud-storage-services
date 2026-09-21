@@ -124,6 +124,10 @@ Reset DB: `npm run db:reset`
 
 `vercel.json` rewrites all traffic to `api/index.js` (Express serverless entry). Local `npm run dev` still uses `src/server.js`.
 
+### Frontend changes
+
+Apply the patched files from [`deploy/frontend-patches/`](./deploy/frontend-patches/) into the sibling `cloud-storage` repo (see `APPLY.md` there). Install `@vercel/blob` on the frontend, then deploy it as a second Vercel project with `NEXT_PUBLIC_API_URL` pointing at this API.
+
 ## Example curl
 
 ```bash
