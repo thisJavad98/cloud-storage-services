@@ -1,49 +1,60 @@
-const fs = require('fs');
+const { put, del } = require('@vercel/blob');
+const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const config = require('./env');
 
-function getStorageRoot() {
-  return path.isAbsolute(config.storagePath)
-    ? config.storagePath
-    : path.join(process.cwd(), config.storagePath);
+function extensionFromName(name, fallback = '') {
+  const ext = path.extname(name || '').slice(0, 32);
+  return ext || fallback;
 }
 
-function ensureStorageRoot() {
-  const root = getStorageRoot();
-  fs.mkdirSync(root, { recursive: true });
-  return root;
+function buildFilePathname(userId, originalName) {
+  const ext = extensionFromName(originalName);
+  return `users/${userId}/files/${uuidv4()}${ext}`;
 }
 
-function getAvatarsRoot() {
-  return path.join(getStorageRoot(), 'avatars');
+function buildAvatarPathname(userId, originalName) {
+  const ext = extensionFromName(originalName, '.jpg');
+  return `users/${userId}/avatars/${uuidv4()}${ext}`;
 }
 
-function ensureAvatarsRoot() {
-  const root = getAvatarsRoot();
-  fs.mkdirSync(root, { recursive: true });
-  return root;
-}
-
-function absolutePathForKey(storageKey) {
-  const root = ensureStorageRoot();
-  const absolute = path.join(root, storageKey);
-  const normalizedRoot = path.resolve(root);
-  const normalizedFile = path.resolve(absolute);
-
-  if (
-    normalizedFile !== normalizedRoot &&
-    !normalizedFile.startsWith(`${normalizedRoot}${path.sep}`)
-  ) {
-    throw new Error('Invalid storage key');
+async function putPublicBlob(pathname, body, contentType) {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    throw new Error(
+      'BLOB_READ_WRITE_TOKEN is required. Enable Vercel Blob and set the token.'
+    );
   }
 
-  return absolute;
+  return put(pathname, body, {
+    access: 'public',
+    token: process.env.BLOB_READ_WRITE_TOKEN,
+    contentType: contentType || undefined,
+    addRandomSuffix: false,
+  });
+}
+
+async function deleteBlob(urlOrPathname) {
+  if (!urlOrPathname) return;
+
+  try {
+    await del(urlOrPathname, {
+      token: process.env.BLOB_READ_WRITE_TOKEN,
+    });
+  } catch {
+    // Best-effort cleanup; DB remains source of truth for metadata.
+  }
+}
+
+function isBlobUrl(value) {
+  return typeof value === 'string' && /^https?:\/\//i.test(value);
 }
 
 module.exports = {
-  getStorageRoot,
-  ensureStorageRoot,
-  getAvatarsRoot,
-  ensureAvatarsRoot,
-  absolutePathForKey,
+  buildFilePathname,
+  buildAvatarPathname,
+  putPublicBlob,
+  deleteBlob,
+  isBlobUrl,
+  maxUploadBytes: () => config.maxUploadBytes,
+  maxAvatarBytes: () => config.maxAvatarBytes,
 };

@@ -1,69 +1,42 @@
-const fs = require('fs');
-const path = require('path');
-const initSqlJs = require('sql.js');
+const { Pool, neonConfig } = require('@neondatabase/serverless');
+const ws = require('ws');
 const config = require('./env');
 
-const absoluteDbPath = path.isAbsolute(config.dbPath)
-  ? config.dbPath
-  : path.join(__dirname, '../../', config.dbPath);
+neonConfig.webSocketConstructor = ws;
 
-fs.mkdirSync(path.dirname(absoluteDbPath), { recursive: true });
-
-let SQL = null;
-let rawDb = null;
+let pool = null;
 let readyPromise = null;
-let txDepth = 0;
 
-function persist() {
-  if (txDepth > 0) return;
-  const data = rawDb.export();
-  fs.writeFileSync(absoluteDbPath, Buffer.from(data));
-}
-
-function mapParams(params) {
-  return params.map((value) => (value === undefined ? null : value));
-}
-
-function rowsFromStatement(stmt) {
-  const rows = [];
-  while (stmt.step()) {
-    rows.push(stmt.getAsObject());
+function getPool() {
+  if (!config.databaseUrl) {
+    throw new Error(
+      'DATABASE_URL is required. Set it to your Neon Postgres connection string.'
+    );
   }
-  return rows;
+
+  if (!pool) {
+    pool = new Pool({ connectionString: config.databaseUrl });
+  }
+
+  return pool;
 }
 
-function createStatement(sql) {
+function createClientApi(client) {
   return {
-    run(...params) {
-      const stmt = rawDb.prepare(sql);
-      try {
-        stmt.bind(mapParams(params));
-        stmt.step();
-      } finally {
-        stmt.free();
-      }
-
-      const changes = rawDb.getRowsModified();
-      persist();
-      return { changes };
+    async query(text, params = []) {
+      return client.query(text, params);
     },
-    get(...params) {
-      const stmt = rawDb.prepare(sql);
-      try {
-        stmt.bind(mapParams(params));
-        return stmt.step() ? stmt.getAsObject() : undefined;
-      } finally {
-        stmt.free();
-      }
+    async one(text, params = []) {
+      const result = await client.query(text, params);
+      return result.rows[0];
     },
-    all(...params) {
-      const stmt = rawDb.prepare(sql);
-      try {
-        stmt.bind(mapParams(params));
-        return rowsFromStatement(stmt);
-      } finally {
-        stmt.free();
-      }
+    async many(text, params = []) {
+      const result = await client.query(text, params);
+      return result.rows;
+    },
+    async execute(text, params = []) {
+      const result = await client.query(text, params);
+      return { rowCount: result.rowCount, rows: result.rows };
     },
   };
 }
@@ -72,54 +45,61 @@ const db = {
   async ready() {
     if (!readyPromise) {
       readyPromise = (async () => {
-        SQL = await initSqlJs();
-        if (fs.existsSync(absoluteDbPath)) {
-          const fileBuffer = fs.readFileSync(absoluteDbPath);
-          rawDb = new SQL.Database(fileBuffer);
-        } else {
-          rawDb = new SQL.Database();
-          persist();
-        }
-        rawDb.run('PRAGMA foreign_keys = ON;');
+        const activePool = getPool();
+        await activePool.query('SELECT 1');
         return db;
-      })();
+      })().catch((error) => {
+        readyPromise = null;
+        throw error;
+      });
     }
     return readyPromise;
   },
 
-  exec(sql) {
-    rawDb.exec(sql);
-    persist();
+  async query(text, params = []) {
+    return getPool().query(text, params);
   },
 
-  prepare(sql) {
-    return createStatement(sql);
+  async one(text, params = []) {
+    const result = await getPool().query(text, params);
+    return result.rows[0];
   },
 
-  transaction(fn) {
-    return (...args) => {
-      rawDb.run('BEGIN');
-      txDepth += 1;
+  async many(text, params = []) {
+    const result = await getPool().query(text, params);
+    return result.rows;
+  },
+
+  async execute(text, params = []) {
+    const result = await getPool().query(text, params);
+    return { rowCount: result.rowCount, rows: result.rows };
+  },
+
+  async transaction(fn) {
+    const client = await getPool().connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(createClientApi(client));
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
       try {
-        const result = fn(...args);
-        rawDb.run('COMMIT');
-        txDepth -= 1;
-        persist();
-        return result;
-      } catch (error) {
-        try {
-          rawDb.run('ROLLBACK');
-        } catch (_rollbackError) {
-          // ignore — original error is more useful
-        }
-        txDepth = Math.max(0, txDepth - 1);
-        throw error;
+        await client.query('ROLLBACK');
+      } catch (_rollbackError) {
+        // Prefer the original error.
       }
-    };
+      throw error;
+    } finally {
+      client.release();
+    }
   },
 
-  get path() {
-    return absoluteDbPath;
+  async end() {
+    if (pool) {
+      await pool.end();
+      pool = null;
+      readyPromise = null;
+    }
   },
 };
 

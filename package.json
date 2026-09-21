@@ -12,7 +12,8 @@
   "keywords": [
     "express",
     "cloud-storage",
-    "api"
+    "api",
+    "vercel"
   ],
   "author": "",
   "license": "ISC",
@@ -20,6 +21,8 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
+    "@vercel/blob": "^1.1.1",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
@@ -29,8 +32,8 @@
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
     "multer": "^2.4.0",
-    "sql.js": "^1.14.2",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"

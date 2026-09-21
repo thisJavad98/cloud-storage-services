@@ -8,7 +8,9 @@ async function start() {
   await migrate();
 
   app.listen(config.port, () => {
-    console.log(`cloud-storage-services listening on http://localhost:${config.port}`);
+    console.log(
+      `cloud-storage-services listening on http://localhost:${config.port}`
+    );
     console.log(`Health check: http://localhost:${config.port}/api/health`);
   });
 }
