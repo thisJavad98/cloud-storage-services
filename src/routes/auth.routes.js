@@ -61,7 +61,20 @@ function handleAvatarUpload(req, res, next) {
   });
 }
 
-router.post('/signup', signupRules, validate, authController.signup);
+function rejectIfSignupDisabled(_req, _res, next) {
+  if (!config.signupEnabled) {
+    return next(new AppError('Signup is disabled. New accounts cannot be created.', 403));
+  }
+  return next();
+}
+
+router.post(
+  '/signup',
+  rejectIfSignupDisabled,
+  signupRules,
+  validate,
+  authController.signup
+);
 router.post('/login', loginRules, validate, authController.login);
 router.get('/me', authenticate, authController.me);
 router.patch(

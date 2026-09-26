@@ -41,6 +41,42 @@ async function migrate() {
     console.log('Added users.bio column.');
   }
 
+  // Feature flags + DB-level signup guard
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key         TEXT PRIMARY KEY,
+      value       TEXT NOT NULL,
+      updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+  `);
+  db.prepare(
+    "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('signup_enabled', '0')"
+  ).run();
+  // Keep DB flag aligned with env (signup off unless SIGNUP_ENABLED=true)
+  const config = require('../config/env');
+  db.prepare(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES ('signup_enabled', ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+     ON CONFLICT(key) DO UPDATE SET
+       value = excluded.value,
+       updated_at = excluded.updated_at`
+  ).run(config.signupEnabled ? '1' : '0');
+
+  db.exec('DROP TRIGGER IF EXISTS prevent_signup_when_disabled;');
+  db.exec(`
+    CREATE TRIGGER prevent_signup_when_disabled
+    BEFORE INSERT ON users
+    WHEN (
+      SELECT COALESCE(
+        (SELECT value FROM app_settings WHERE key = 'signup_enabled'),
+        '0'
+      ) = '0'
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Signup is disabled');
+    END;
+  `);
+
   const tableList = db
     .prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"

@@ -100,6 +100,10 @@ function logActivity(userId, action, meta = {}) {
 }
 
 async function signup({ email, password, fullName }, meta = {}) {
+  if (!config.signupEnabled) {
+    throw new AppError('Signup is disabled. New accounts cannot be created.', 403);
+  }
+
   const normalizedEmail = email.trim().toLowerCase();
 
   const existing = db

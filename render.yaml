@@ -27,3 +27,5 @@ services:
         value: 7d
       - key: DEFAULT_STORAGE_QUOTA_BYTES
         value: "5368709120"
+      - key: SIGNUP_ENABLED
+        value: "false"

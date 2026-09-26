@@ -15,6 +15,8 @@ const config = {
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },
   defaultStorageQuotaBytes: Number(process.env.DEFAULT_STORAGE_QUOTA_BYTES) || 5_368_709_120,
+  // Signup is off by default; set SIGNUP_ENABLED=true to allow new accounts.
+  signupEnabled: String(process.env.SIGNUP_ENABLED || 'false').toLowerCase() === 'true',
 };
 
 module.exports = config;

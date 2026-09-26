@@ -170,3 +170,29 @@ CREATE TABLE IF NOT EXISTS activity_logs (
 CREATE INDEX IF NOT EXISTS idx_activity_logs_user_id ON activity_logs (user_id);
 CREATE INDEX IF NOT EXISTS idx_activity_logs_action ON activity_logs (action);
 CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON activity_logs (created_at);
+
+-- ---------------------------------------------------------------------------
+-- app_settings: feature flags (e.g. signup_enabled)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS app_settings (
+  key         TEXT PRIMARY KEY,
+  value       TEXT NOT NULL,
+  updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+INSERT OR IGNORE INTO app_settings (key, value) VALUES ('signup_enabled', '0');
+
+-- Block new user rows while signup is disabled (DB-level guard)
+DROP TRIGGER IF EXISTS prevent_signup_when_disabled;
+CREATE TRIGGER prevent_signup_when_disabled
+BEFORE INSERT ON users
+WHEN (
+  SELECT COALESCE(
+    (SELECT value FROM app_settings WHERE key = 'signup_enabled'),
+    '0'
+  ) = '0'
+)
+BEGIN
+  SELECT RAISE(ABORT, 'Signup is disabled');
+END;
+
