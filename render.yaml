@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: cloud-storage-services
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_PATH
+        value: ./data/cloud-storage.db
+      - key: STORAGE_PATH
+        value: ./uploads
+      - key: MAX_UPLOAD_BYTES
+        value: "104857600"
+      - key: MAX_AVATAR_BYTES
+        value: "2097152"
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_ACCESS_EXPIRES_IN
+        value: 1h
+      - key: JWT_REFRESH_EXPIRES_IN
+        value: 7d
+      - key: DEFAULT_STORAGE_QUOTA_BYTES
+        value: "5368709120"
