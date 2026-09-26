@@ -26,11 +26,18 @@ const ALLOWED_AVATAR_MIME = new Set([
 function publicUser(row) {
   if (!row) return null;
 
+  let avatarUrl = row.avatar_url || null;
+  // Bust browser caches when the profile changes (multi-device / multi-tab).
+  if (avatarUrl && row.updated_at) {
+    const base = String(avatarUrl).split('?')[0];
+    avatarUrl = `${base}?v=${encodeURIComponent(row.updated_at)}`;
+  }
+
   return {
     id: row.id,
     email: row.email,
     fullName: row.full_name,
-    avatarUrl: row.avatar_url,
+    avatarUrl,
     bio: row.bio || null,
     role: row.role,
     storageQuotaBytes: row.storage_quota_bytes,
@@ -45,7 +52,9 @@ function publicUser(row) {
 
 function deleteAvatarFile(avatarUrl) {
   if (!avatarUrl || typeof avatarUrl !== 'string') return;
-  deleteStoredObject(avatarUrl).catch(() => {});
+  // Strip cache-buster before deleting local/remote object.
+  const cleaned = avatarUrl.split('?')[0];
+  deleteStoredObject(cleaned).catch(() => {});
 }
 
 function createTokenPair(user, meta = {}) {

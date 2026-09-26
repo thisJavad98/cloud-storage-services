@@ -20,7 +20,20 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
-app.use('/uploads', express.static(ensureStorageRoot()));
+app.use(
+  '/uploads',
+  express.static(ensureStorageRoot(), {
+    etag: false,
+    lastModified: false,
+    setHeaders(res) {
+      // Avatars/files must not stick in one device's HTTP cache after another
+      // device updates them.
+      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    },
+  })
+);
 app.use('/api', routes);
 
 app.use(notFound);
