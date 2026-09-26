@@ -1,8 +1,11 @@
 const express = require('express');
 const authRoutes = require('./auth.routes');
 const filesRoutes = require('./files.routes');
+const { noStore } = require('../middleware/noStore');
 
 const router = express.Router();
+
+router.use(noStore);
 
 router.get('/health', (_req, res) => {
   res.json({

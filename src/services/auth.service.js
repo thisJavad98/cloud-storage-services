@@ -23,6 +23,22 @@ const ALLOWED_AVATAR_MIME = new Set([
   'image/gif',
 ]);
 
+function getDataRevision(userId) {
+  const row = db
+    .prepare(
+      `SELECT MAX(ts) AS rev FROM (
+         SELECT updated_at AS ts FROM users WHERE id = ?
+         UNION ALL
+         SELECT updated_at AS ts FROM files WHERE user_id = ?
+         UNION ALL
+         SELECT updated_at AS ts FROM folders WHERE user_id = ?
+       )`
+    )
+    .get(userId, userId, userId);
+
+  return row?.rev || null;
+}
+
 function publicUser(row) {
   if (!row) return null;
 
@@ -47,6 +63,8 @@ function publicUser(row) {
     lastLoginAt: row.last_login_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    // Max updated_at across profile + files + folders — clients use this to sync.
+    dataRevision: getDataRevision(row.id),
   };
 }
 
