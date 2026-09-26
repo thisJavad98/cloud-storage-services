@@ -34,6 +34,22 @@ async function login(req, res, next) {
   }
 }
 
+async function refresh(req, res, next) {
+  try {
+    const result = await authService.refreshSession(
+      req.body?.refreshToken,
+      requestMeta(req)
+    );
+    return res.status(200).json({
+      success: true,
+      message: 'Session refreshed',
+      data: result,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function me(req, res, next) {
   try {
     const user = authService.getProfile(req.user.id);
@@ -99,6 +115,7 @@ async function deleteAvatar(req, res, next) {
 module.exports = {
   signup,
   login,
+  refresh,
   me,
   updateProfile,
   uploadAvatar,

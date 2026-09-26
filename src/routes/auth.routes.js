@@ -7,6 +7,7 @@ const { authenticate } = require('../middleware/auth');
 const {
   signupRules,
   loginRules,
+  refreshRules,
   updateProfileRules,
   validate,
 } = require('../middleware/validate');
@@ -76,6 +77,7 @@ router.post(
   authController.signup
 );
 router.post('/login', loginRules, validate, authController.login);
+router.post('/refresh', refreshRules, validate, authController.refresh);
 router.get('/me', authenticate, authController.me);
 router.patch(
   '/me',

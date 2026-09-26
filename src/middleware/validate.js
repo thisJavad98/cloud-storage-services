@@ -33,6 +33,13 @@ const loginRules = [
     .withMessage('Password is required'),
 ];
 
+const refreshRules = [
+  body('refreshToken')
+    .isString()
+    .notEmpty()
+    .withMessage('Refresh token is required'),
+];
+
 const updateProfileRules = [
   body('fullName')
     .optional()
@@ -94,6 +101,7 @@ function validate(req, _res, next) {
 module.exports = {
   signupRules,
   loginRules,
+  refreshRules,
   updateProfileRules,
   updateFileRules,
   createFolderRules,

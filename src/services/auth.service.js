@@ -9,6 +9,7 @@ const { hashPassword, comparePassword } = require('../utils/password');
 const {
   signAccessToken,
   signRefreshToken,
+  verifyRefreshToken,
   hashToken,
   refreshExpiryDate,
 } = require('../utils/jwt');
@@ -308,9 +309,75 @@ function removeAvatar(userId, meta = {}) {
   return getProfile(userId);
 }
 
+function refreshSession(refreshToken, meta = {}) {
+  if (!refreshToken || typeof refreshToken !== 'string') {
+    throw new AppError('Refresh token is required', 400);
+  }
+
+  let payload;
+  try {
+    payload = verifyRefreshToken(refreshToken);
+  } catch {
+    throw new AppError('Invalid or expired refresh token', 401);
+  }
+
+  if (payload.type !== 'refresh' || !payload.sub) {
+    throw new AppError('Invalid refresh token', 401);
+  }
+
+  const tokenHash = hashToken(refreshToken);
+  const stored = db
+    .prepare(
+      `SELECT * FROM refresh_tokens
+       WHERE token_hash = ? AND user_id = ?`
+    )
+    .get(tokenHash, payload.sub);
+
+  if (!stored) {
+    throw new AppError('Refresh token is not recognized', 401);
+  }
+
+  if (stored.revoked_at) {
+    throw new AppError('Refresh token has been revoked', 401);
+  }
+
+  if (stored.expires_at && new Date(stored.expires_at).getTime() < Date.now()) {
+    db.prepare(
+      `UPDATE refresh_tokens
+       SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+       WHERE id = ?`
+    ).run(stored.id);
+    throw new AppError('Refresh token has expired', 401);
+  }
+
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(payload.sub);
+  if (!user || !user.is_active) {
+    throw new AppError('User not found or inactive', 401);
+  }
+
+  db.prepare(
+    `UPDATE refresh_tokens
+     SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE id = ?`
+  ).run(stored.id);
+
+  const tokens = createTokenPair(user, meta);
+
+  logActivity(user.id, 'auth.refresh', {
+    ipAddress: meta.ipAddress,
+    userAgent: meta.userAgent,
+  });
+
+  return {
+    user: publicUser(user),
+    ...tokens,
+  };
+}
+
 module.exports = {
   signup,
   login,
+  refreshSession,
   getProfile,
   updateProfile,
   updateAvatar,
