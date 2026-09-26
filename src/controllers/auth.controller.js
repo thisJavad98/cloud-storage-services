@@ -84,7 +84,7 @@ async function updateProfile(req, res, next) {
 
 async function uploadAvatar(req, res, next) {
   try {
-    const user = authService.updateAvatar(
+    const user = await authService.updateAvatar(
       req.user.id,
       req.file,
       requestMeta(req)

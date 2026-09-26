@@ -1,3 +1,4 @@
+const contentDisposition = require('content-disposition');
 const filesService = require('../services/files.service');
 
 function requestMeta(req) {
@@ -9,7 +10,7 @@ function requestMeta(req) {
 
 async function upload(req, res, next) {
   try {
-    const file = filesService.uploadFile(
+    const file = await filesService.uploadFile(
       req.user.id,
       req.file,
       {
@@ -67,12 +68,36 @@ async function getOne(req, res, next) {
 
 async function download(req, res, next) {
   try {
-    const { file, absolutePath } = filesService.getDownloadTarget(
+    const { file, absolutePath, downloadUrl } = filesService.getDownloadTarget(
       req.user.id,
       req.params.id
     );
 
-    return res.download(absolutePath, file.name, (error) => {
+    // Never let browsers/PWAs keep a stale copy — otherwise one device can
+    // show a cached file after the server lost the bytes (ephemeral disk).
+    res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
+    if (downloadUrl) {
+      return res.redirect(302, downloadUrl);
+    }
+
+    const inline =
+      req.query.inline === '1' ||
+      req.query.inline === 'true' ||
+      req.query.disposition === 'inline';
+
+    res.setHeader(
+      'Content-Type',
+      file.mimeType || 'application/octet-stream'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      contentDisposition(file.name, { type: inline ? 'inline' : 'attachment' })
+    );
+
+    return res.sendFile(absolutePath, (error) => {
       if (error && !res.headersSent) {
         next(error);
       }

@@ -29,3 +29,5 @@ services:
         value: "5368709120"
       - key: SIGNUP_ENABLED
         value: "false"
+      - key: BLOB_READ_WRITE_TOKEN
+        sync: false

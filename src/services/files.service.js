@@ -3,7 +3,14 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/db');
-const { absolutePathForKey, ensureStorageRoot } = require('../config/storage');
+const {
+  absolutePathForKey,
+  ensureStorageRoot,
+  isRemoteStorageKey,
+  localContentExists,
+  storeUploadedFile,
+  deleteStoredObject,
+} = require('../config/storage');
 const AppError = require('../utils/AppError');
 
 function publicFile(row) {
@@ -23,6 +30,7 @@ function publicFile(row) {
     trashedAt: row.trashed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    contentAvailable: localContentExists(row.storage_key),
   };
 }
 
@@ -132,17 +140,11 @@ function logActivity(userId, action, meta = {}) {
 }
 
 function removeStoredFile(storageKey) {
-  try {
-    const absolute = absolutePathForKey(storageKey);
-    if (fs.existsSync(absolute)) {
-      fs.unlinkSync(absolute);
-    }
-  } catch {
-    // Best-effort cleanup; DB remains source of truth for metadata.
-  }
+  // Fire-and-forget sync wrapper for callers that are not async yet.
+  deleteStoredObject(storageKey).catch(() => {});
 }
 
-function uploadFile(userId, uploaded, options = {}, meta = {}) {
+async function uploadFile(userId, uploaded, options = {}, meta = {}) {
   if (!uploaded || !uploaded.path) {
     throw new AppError('File is required', 400);
   }
@@ -168,7 +170,20 @@ function uploadFile(userId, uploaded, options = {}, meta = {}) {
   const fileBuffer = fs.readFileSync(uploaded.path);
   const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
   const fileId = uuidv4();
-  const storageKey = path.basename(uploaded.path);
+  let storageKey;
+
+  try {
+    storageKey = await storeUploadedFile({
+      userId,
+      uploaded,
+      originalName: name,
+      mimeType,
+    });
+  } catch (error) {
+    removeStoredFile(path.basename(uploaded.path));
+    throw error;
+  }
+
   const now = new Date().toISOString();
 
   const write = db.transaction(() => {
@@ -321,6 +336,15 @@ function getFile(userId, fileId) {
 
 function getDownloadTarget(userId, fileId) {
   const file = getOwnedFileOrThrow(userId, fileId, { includeTrashed: false });
+
+  if (isRemoteStorageKey(file.storage_key)) {
+    return {
+      file: publicFile(file),
+      downloadUrl: file.storage_key,
+      absolutePath: null,
+    };
+  }
+
   const absolutePath = absolutePathForKey(file.storage_key);
 
   if (!fs.existsSync(absolutePath)) {
@@ -330,6 +354,7 @@ function getDownloadTarget(userId, fileId) {
   return {
     file: publicFile(file),
     absolutePath,
+    downloadUrl: null,
   };
 }
 
@@ -445,6 +470,36 @@ function deleteFilePermanent(userId, fileId, meta = {}) {
   });
 
   return { id: fileId, deleted: true };
+}
+
+function repairMissingLocalFiles() {
+  const rows = db
+    .prepare(
+      `SELECT id, name, storage_key FROM files
+       WHERE storage_key IS NOT NULL
+         AND storage_key NOT LIKE 'http://%'
+         AND storage_key NOT LIKE 'https://%'`
+    )
+    .all();
+
+  let missing = 0;
+  for (const row of rows) {
+    if (!localContentExists(row.storage_key)) {
+      missing += 1;
+      console.warn(
+        `[storage] Missing bytes for file "${row.name}" (${row.id}) key=${row.storage_key}`
+      );
+    }
+  }
+
+  if (missing > 0) {
+    console.warn(
+      `[storage] ${missing} file(s) have metadata but missing content. ` +
+        'Set BLOB_READ_WRITE_TOKEN so uploads survive deploys and work on every device.'
+    );
+  }
+
+  return missing;
 }
 
 function listFolders(userId, query = {}) {
@@ -735,4 +790,5 @@ module.exports = {
   deleteFolder,
   publicFile,
   publicFolder,
+  repairMissingLocalFiles,
 };

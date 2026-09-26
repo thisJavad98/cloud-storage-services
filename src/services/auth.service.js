@@ -1,9 +1,11 @@
 const fs = require('fs');
-const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/db');
 const config = require('../config/env');
-const { absolutePathForKey } = require('../config/storage');
+const {
+  deleteStoredObject,
+  storeUploadedAvatar,
+} = require('../config/storage');
 const AppError = require('../utils/AppError');
 const { hashPassword, comparePassword } = require('../utils/password');
 const {
@@ -43,17 +45,7 @@ function publicUser(row) {
 
 function deleteAvatarFile(avatarUrl) {
   if (!avatarUrl || typeof avatarUrl !== 'string') return;
-  if (!avatarUrl.startsWith('/uploads/avatars/')) return;
-
-  const storageKey = avatarUrl.replace(/^\/uploads\//, '');
-  try {
-    const absolute = absolutePathForKey(storageKey);
-    if (fs.existsSync(absolute)) {
-      fs.unlinkSync(absolute);
-    }
-  } catch {
-    // Ignore cleanup errors for stale/missing avatar files
-  }
+  deleteStoredObject(avatarUrl).catch(() => {});
 }
 
 function createTokenPair(user, meta = {}) {
@@ -242,7 +234,7 @@ function updateProfile(userId, { fullName, bio }, meta = {}) {
   return getProfile(userId);
 }
 
-function updateAvatar(userId, file, meta = {}) {
+async function updateAvatar(userId, file, meta = {}) {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
 
   if (!user) {
@@ -260,8 +252,11 @@ function updateAvatar(userId, file, meta = {}) {
     throw new AppError('Avatar must be a JPEG, PNG, WebP, or GIF image', 400);
   }
 
-  const filename = path.basename(file.filename || file.path);
-  const avatarUrl = `/uploads/avatars/${filename}`;
+  const avatarUrl = await storeUploadedAvatar({
+    userId,
+    uploaded: file,
+    mimeType: file.mimetype,
+  });
   const previousAvatar = user.avatar_url;
   const now = new Date().toISOString();
 

@@ -15,9 +15,11 @@ let readyPromise = null;
 let txDepth = 0;
 
 function persist() {
-  if (txDepth > 0) return;
+  if (txDepth > 0 || !rawDb) return;
   const data = rawDb.export();
-  fs.writeFileSync(absoluteDbPath, Buffer.from(data));
+  const tempPath = `${absoluteDbPath}.tmp`;
+  fs.writeFileSync(tempPath, Buffer.from(data));
+  fs.renameSync(tempPath, absoluteDbPath);
 }
 
 function mapParams(params) {

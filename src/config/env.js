@@ -17,6 +17,8 @@ const config = {
   defaultStorageQuotaBytes: Number(process.env.DEFAULT_STORAGE_QUOTA_BYTES) || 5_368_709_120,
   // Signup is off by default; set SIGNUP_ENABLED=true to allow new accounts.
   signupEnabled: String(process.env.SIGNUP_ENABLED || 'false').toLowerCase() === 'true',
+  // When set, file/avatar bytes are stored in Vercel Blob (survives deploys & multi-device).
+  blobReadWriteToken: process.env.BLOB_READ_WRITE_TOKEN || '',
 };
 
 module.exports = config;
