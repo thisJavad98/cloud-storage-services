@@ -80,20 +80,16 @@ async function getOne(req, res, next) {
 
 async function download(req, res, next) {
   try {
-    const { file, absolutePath, downloadUrl } = filesService.getDownloadTarget(
+    const { file, buffer } = await filesService.getDownloadTarget(
       req.user.id,
       req.params.id
     );
 
-    // Never let browsers/PWAs keep a stale copy — otherwise one device can
-    // show a cached file after the server lost the bytes (ephemeral disk).
+    // Auth-proxied plaintext only — never redirect to raw blob URLs.
     res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
-
-    if (downloadUrl) {
-      return res.redirect(302, downloadUrl);
-    }
+    res.setHeader('X-Content-Type-Options', 'nosniff');
 
     const inline =
       req.query.inline === '1' ||
@@ -104,16 +100,13 @@ async function download(req, res, next) {
       'Content-Type',
       file.mimeType || 'application/octet-stream'
     );
+    res.setHeader('Content-Length', String(buffer.length));
     res.setHeader(
       'Content-Disposition',
       contentDisposition(file.name, { type: inline ? 'inline' : 'attachment' })
     );
 
-    return res.sendFile(absolutePath, (error) => {
-      if (error && !res.headersSent) {
-        next(error);
-      }
-    });
+    return res.status(200).send(buffer);
   } catch (error) {
     return next(error);
   }

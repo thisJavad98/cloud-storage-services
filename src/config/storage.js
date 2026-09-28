@@ -3,6 +3,12 @@ const path = require('path');
 const { put, del } = require('@vercel/blob');
 const { v4: uuidv4 } = require('uuid');
 const config = require('./env');
+const {
+  encryptBuffer,
+  decryptBuffer,
+  encryptionEnabled,
+} = require('../security/cryptoAtRest');
+const AppError = require('../utils/AppError');
 
 function getStorageRoot() {
   return path.isAbsolute(config.storagePath)
@@ -70,16 +76,27 @@ async function putPublicBlob(pathname, body, contentType) {
   });
 }
 
+/**
+ * Persist user file bytes. Content is AES-256-GCM encrypted when
+ * FILE_ENCRYPTION_KEY is set. Blob stores ciphertext as application/octet-stream
+ * so a leaked URL cannot reveal the original file without the server key.
+ */
 async function storeUploadedFile({ userId, uploaded, originalName, mimeType }) {
   const ext = extensionFromName(
     originalName || uploaded.originalname || uploaded.filename,
     path.extname(uploaded.filename || uploaded.path || '')
   );
 
+  const plaintext = fs.readFileSync(uploaded.path);
+  const payload = encryptBuffer(plaintext);
+  const storedMime = encryptionEnabled()
+    ? 'application/octet-stream'
+    : mimeType || 'application/octet-stream';
+  const encSuffix = encryptionEnabled() ? '.enc' : '';
+
   if (blobEnabled()) {
-    const pathname = `users/${userId}/files/${uuidv4()}${ext}`;
-    const body = fs.readFileSync(uploaded.path);
-    const blob = await putPublicBlob(pathname, body, mimeType);
+    const pathname = `users/${userId}/files/${uuidv4()}${ext}${encSuffix}`;
+    const blob = await putPublicBlob(pathname, payload, storedMime);
 
     try {
       fs.unlinkSync(uploaded.path);
@@ -88,6 +105,20 @@ async function storeUploadedFile({ userId, uploaded, originalName, mimeType }) {
     }
 
     return blob.url;
+  }
+
+  if (encryptionEnabled()) {
+    const filename = `${uuidv4()}${ext}.enc`;
+    const absolute = absolutePathForKey(filename);
+    fs.writeFileSync(absolute, payload);
+
+    try {
+      fs.unlinkSync(uploaded.path);
+    } catch {
+      // ignore
+    }
+
+    return filename;
   }
 
   return path.basename(uploaded.path);
@@ -115,6 +146,40 @@ async function storeUploadedAvatar({ userId, uploaded, mimeType }) {
 
   const filename = path.basename(uploaded.filename || uploaded.path);
   return `/uploads/avatars/${filename}`;
+}
+
+/**
+ * Load stored bytes and decrypt (legacy plaintext passes through).
+ */
+async function readStoredObject(storageKey) {
+  if (!storageKey) {
+    throw new AppError('Stored file content is missing', 404);
+  }
+
+  let raw;
+
+  if (isRemoteStorageKey(storageKey)) {
+    const response = await fetch(storageKey);
+    if (!response.ok) {
+      throw new AppError('Stored file content is missing', 404);
+    }
+    raw = Buffer.from(await response.arrayBuffer());
+  } else {
+    const absolute = absolutePathForKey(storageKey);
+    if (!fs.existsSync(absolute)) {
+      throw new AppError('Stored file content is missing', 404);
+    }
+    raw = fs.readFileSync(absolute);
+  }
+
+  try {
+    return decryptBuffer(raw);
+  } catch (error) {
+    throw new AppError(
+      error.message || 'Failed to decrypt stored file',
+      500
+    );
+  }
 }
 
 async function deleteStoredObject(storageKeyOrUrl) {
@@ -179,6 +244,8 @@ module.exports = {
   blobEnabled,
   storeUploadedFile,
   storeUploadedAvatar,
+  readStoredObject,
   deleteStoredObject,
   localContentExists,
+  encryptionEnabled,
 };

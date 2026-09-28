@@ -1,16 +1,18 @@
-const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/db');
+const config = require('../config/env');
 const {
-  absolutePathForKey,
   ensureStorageRoot,
-  isRemoteStorageKey,
   localContentExists,
   storeUploadedFile,
+  readStoredObject,
   deleteStoredObject,
+  encryptionEnabled,
 } = require('../config/storage');
+const { sha256Hex } = require('../security/cryptoAtRest');
+const { assertSafeUpload } = require('../security/fileGuard');
 const AppError = require('../utils/AppError');
 
 function publicFile(row) {
@@ -23,7 +25,7 @@ function publicFile(row) {
     name: row.name,
     mimeType: row.mime_type,
     sizeBytes: row.size_bytes,
-    storageKey: row.storage_key,
+    // Never expose raw blob URLs / disk keys to clients.
     checksumSha256: row.checksum_sha256,
     version: row.version,
     isTrashed: Boolean(row.is_trashed),
@@ -31,6 +33,7 @@ function publicFile(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     contentAvailable: localContentExists(row.storage_key),
+    encryptedAtRest: encryptionEnabled(),
   };
 }
 
@@ -157,6 +160,18 @@ async function uploadFile(userId, uploaded, options = {}, meta = {}) {
   const sizeBytes = Number(uploaded.size) || 0;
   const mimeType = uploaded.mimetype || 'application/octet-stream';
 
+  try {
+    assertSafeUpload({
+      originalName: name,
+      mimeType,
+      sizeBytes,
+      maxBytes: config.maxUploadBytes,
+    });
+  } catch (error) {
+    removeStoredFile(path.basename(uploaded.path));
+    throw error;
+  }
+
   if (findNameConflict(userId, folderId, name)) {
     removeStoredFile(path.basename(uploaded.path));
     throw new AppError('A file with this name already exists in this folder', 409);
@@ -168,7 +183,7 @@ async function uploadFile(userId, uploaded, options = {}, meta = {}) {
   }
 
   const fileBuffer = fs.readFileSync(uploaded.path);
-  const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+  const checksum = sha256Hex(fileBuffer);
   const fileId = uuidv4();
   let storageKey;
 
@@ -334,27 +349,17 @@ function getFile(userId, fileId) {
   return publicFile(getOwnedFileOrThrow(userId, fileId));
 }
 
-function getDownloadTarget(userId, fileId) {
+/**
+ * Resolve download payload. Always returns decrypted bytes via the API —
+ * never a public blob redirect (auth-gated, end-to-end over TLS).
+ */
+async function getDownloadTarget(userId, fileId) {
   const file = getOwnedFileOrThrow(userId, fileId, { includeTrashed: false });
-
-  if (isRemoteStorageKey(file.storage_key)) {
-    return {
-      file: publicFile(file),
-      downloadUrl: file.storage_key,
-      absolutePath: null,
-    };
-  }
-
-  const absolutePath = absolutePathForKey(file.storage_key);
-
-  if (!fs.existsSync(absolutePath)) {
-    throw new AppError('Stored file content is missing', 404);
-  }
+  const buffer = await readStoredObject(file.storage_key);
 
   return {
     file: publicFile(file),
-    absolutePath,
-    downloadUrl: null,
+    buffer,
   };
 }
 
