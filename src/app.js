@@ -28,14 +28,25 @@ app.use(
       if (config.corsOrigins.includes(origin)) {
         return callback(null, true);
       }
+      // Local Next.js may bind 3000/3001/etc — allow any localhost in development.
+      if (
+        config.nodeEnv !== 'production' &&
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)
+      ) {
+        return callback(null, true);
+      }
       return callback(null, false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+    optionsSuccessStatus: 204,
     maxAge: 600,
   })
 );
+
+// Ensure bare OPTIONS never falls through to JWT-protected routers.
+app.options('*', cors());
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));

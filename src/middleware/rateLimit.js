@@ -16,6 +16,10 @@ function createRateLimiter({
   }
 
   return function rateLimit(req, res, next) {
+    if (req.method === 'OPTIONS') {
+      return next();
+    }
+
     const now = Date.now();
     if (hits.size > 5000) prune(now);
 

@@ -3,6 +3,11 @@ const AppError = require('../utils/AppError');
 const { verifyAccessToken } = require('../utils/jwt');
 
 function authenticate(req, _res, next) {
+  // CORS preflight must never require a Bearer token.
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+
   const header = req.get('authorization') || '';
   const [scheme, token] = header.split(' ');
 
