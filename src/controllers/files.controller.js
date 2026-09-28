@@ -54,6 +54,18 @@ async function search(req, res, next) {
   }
 }
 
+async function browseIsland(req, res, next) {
+  try {
+    const result = filesService.browseIsland(req.user.id, req.query);
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function getOne(req, res, next) {
   try {
     const file = filesService.getFile(req.user.id, req.params.id);
@@ -269,6 +281,7 @@ module.exports = {
   upload,
   list,
   search,
+  browseIsland,
   getOne,
   download,
   update,

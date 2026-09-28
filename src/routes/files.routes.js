@@ -63,6 +63,7 @@ router.patch('/folders/:id', updateFolderRules, validate, filesController.update
 router.delete('/folders/:id', filesController.removeFolder);
 
 router.get('/search', filesController.search);
+router.get('/island', filesController.browseIsland);
 router.get('/', filesController.list);
 router.post('/', handleUpload, filesController.upload);
 router.get('/:id', filesController.getOne);

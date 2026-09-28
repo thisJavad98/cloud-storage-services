@@ -547,6 +547,43 @@ function listFolders(userId, query = {}) {
   return rows.map(publicFolder);
 }
 
+/**
+ * Combined folder+file listing for the Data Island UI.
+ * parentId: omit/null/root → root sea; UUID → that folder's waters.
+ */
+function browseIsland(userId, query = {}) {
+  getUserOrThrow(userId);
+
+  let parentId = null;
+  if (
+    query.parentId !== undefined &&
+    query.parentId !== null &&
+    query.parentId !== '' &&
+    query.parentId !== 'null' &&
+    query.parentId !== 'root'
+  ) {
+    parentId = query.parentId;
+  }
+
+  const folder = parentId ? getFolder(userId, parentId) : null;
+  const folders = listFolders(userId, {
+    parentId: parentId === null ? 'root' : parentId,
+  });
+  const fileResult = listFiles(userId, {
+    folderId: parentId === null ? 'root' : parentId,
+    limit: query.limit || 100,
+    offset: query.offset || 0,
+  });
+
+  return {
+    parentId,
+    folder,
+    folders,
+    files: fileResult.files,
+    pagination: fileResult.pagination,
+  };
+}
+
 function searchLibrary(userId, query = {}) {
   const rawQ =
     typeof query.q === 'string'
@@ -776,6 +813,7 @@ ensureStorageRoot();
 module.exports = {
   uploadFile,
   listFiles,
+  browseIsland,
   searchLibrary,
   getFile,
   getDownloadTarget,
